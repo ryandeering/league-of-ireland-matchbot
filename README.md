@@ -1,5 +1,4 @@
 # Matchbot for League of Ireland Subreddit
-This repository contains the source code for Matchbot, a Python script created by [Ryan Deering](https://www.github.com/ryandeering) to automatically generate and post discussion threads for the League of Ireland Premier Division matches on the League of Ireland subreddit.
 
 ![image](https://user-images.githubusercontent.com/37181720/226486687-bf9e23d0-582e-4dd8-b16a-5259fafa4df6.png)
 
