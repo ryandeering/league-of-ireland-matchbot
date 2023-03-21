@@ -12,6 +12,12 @@ from matchbot_config import MatchbotConfig
 LEAGUE_ID = 358
 SEASON = 2023
 
+normalised_team_names = {
+    "Kerry": "Kerry FC",
+    "Waterford": "Waterford FC",
+    "Wexford": "Wexford FC",
+}
+
 config = MatchbotConfig()
 
 def get_current_gameweek():
@@ -36,32 +42,40 @@ def get_current_gameweek():
 
 def get_matches_for_gameweek(gameweek):
     """Return matches for a gameweek."""
-    response = requests.get(
-        f"{config.base_url}/fixtures",
-        params={
-            "league": LEAGUE_ID,
-            "season": SEASON,
-            "round": gameweek,
-        },
-        headers=config.headers,
-        timeout=5,
-    )
-    response.raise_for_status()
-    return response.json()["response"]
+    try:
+        response = requests.get(
+            f"{config.base_url}/fixtures",
+            params={
+                "league": LEAGUE_ID,
+                "season": SEASON,
+                "round": gameweek,
+            },
+            headers=config.headers,
+            timeout=5,
+        )
+        response.raise_for_status()
+        return response.json()["response"]
+    except requests.exceptions.RequestException as request_exception:
+        print(f"Error getting matches for gameweek: {request_exception}")
+        raise
 
 def get_league_table():
     """Return league table."""
-    response = requests.get(
-        f"{config.base_url}/standings",
-        headers=config.headers,
-        params={
-            "league": LEAGUE_ID,
-            'season': SEASON,
-        },
-        timeout=5,
-    )
-    response.raise_for_status()
-    return response.json()['response'][0]['league']['standings'][0]
+    try:
+        response = requests.get(
+            f"{config.base_url}/standings",
+            headers=config.headers,
+            params={
+                "league": LEAGUE_ID,
+                'season': SEASON,
+            },
+            timeout=5,
+        )
+        response.raise_for_status()
+        return response.json()['response'][0]['league']['standings'][0]
+    except requests.exceptions.RequestException as request_exception:
+        print(f"Error getting league table: {request_exception}")
+        raise
 
 def submit_reddit_post(title, body):
     """Submit a post to the subreddit."""
@@ -141,28 +155,24 @@ def build_post_body(matches_data, league_table, gameweek_number):
     return body
 
 def get_last_matches(team_id, league_table):
-    """Return last five matches for a team."""
+    """Return last five match results through emojis for a team."""
     last_matches = 5
     team_form = next((team['form'] for team in league_table if team['team']['id'] == team_id), None)
     if team_form:
         return team_form[-last_matches:].replace('W', '✅').replace('D', '⚪').replace('L', '❌')
-    return 'N/A'
+    return ''
 
 def normalise_team_name(team_name):
     """Normalise team name."""
-    normalized_team_names = {
-        "Kerry": "Kerry FC",
-        "Waterford": "Waterford FC",
-        "Wexford": "Wexford FC",
-    }
-
-    return normalized_team_names.get(team_name, team_name)
+    return normalised_team_names.get(team_name, team_name)
 
 def ordinal_suffix(day):
     """Add suffix to date header. Why is this not built into the Python standard library!?!"""
+    suffixes = {1: 'st', 2: 'nd', 3: 'rd'}
     if 4 <= day <= 20 or 24 <= day <= 30:
         return f"{day}th"
-    return f"{day}{['st', 'nd', 'rd'][day % 10 - 1]}"
+    return f"{day}{suffixes.get(day % 10, 'th')}"
+
 
 def main():
     """Main function."""
