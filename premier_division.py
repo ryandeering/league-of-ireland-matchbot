@@ -3,7 +3,7 @@ Matchbot by Ryan Deering (github.com/ryandeering)
 Used for the League of Ireland subreddit
 """
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from tabulate import tabulate
 import praw
 import requests
@@ -103,7 +103,7 @@ def build_post_body(matches_data, league_table, gameweek_number):
         matches_by_date.setdefault(date, []).append(match)
 
     body = ""
-    for date, matches_list in matches_by_date.items():
+    for date, matches_list in sorted(matches_by_date.items()):
         date_extracted = datetime.strptime(date, "%Y-%m-%d")
         date_header = date_extracted.strftime(f"%A, %B {ordinal_suffix(date_extracted.day)}")
         section_header = f"##{date_header}\n\n"
@@ -111,7 +111,7 @@ def build_post_body(matches_data, league_table, gameweek_number):
         matches = [
             [
                 normalise_team_name(match["teams"]["home"]["name"]),
-                datetime.fromisoformat(match["fixture"]["date"]).strftime("%H:%M"),
+                (datetime.fromisoformat(match["fixture"]["date"]) + timedelta(hours=1)).strftime("%H:%M"),  # Add 1 hour to kickoff time, for some reason the api doesn't care about daylight savings.
                 normalise_team_name(match["teams"]["away"]["name"]),
                 match["fixture"]["venue"]["name"],
             ]
