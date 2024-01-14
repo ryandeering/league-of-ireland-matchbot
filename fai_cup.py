@@ -8,17 +8,10 @@ from tabulate import tabulate
 import praw
 import requests
 from matchbot_config import MatchbotConfig
+from common import normalised_team_names
 
 TOURNAMENT_ID = 359
-SEASON = 2023
-
-normalised_team_names = {
-    "St Patrick's Athl.": "St Patrick's Athletic",
-    "Dundalk": "Dundalk FC",
-    "Kerry": "Kerry FC",
-    "Waterford": "Waterford FC",
-    "Wexford": "Wexford FC",
-}
+SEASON = datetime.now().year
 
 config = MatchbotConfig()
 
