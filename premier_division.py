@@ -154,7 +154,6 @@ def build_post_body(matches_data, league_table, gameweek_number):
         body += f"## League Table, as of Round {gameweek_number - 1}\n\n"
         body += f"{tabulate(table_data, headers=table_headers, tablefmt='pipe')}\n\n"
 
-    body += f"{tabulate(table_data, headers=table_headers, tablefmt='pipe')}\n\n"
     body += (
         "\n\n Welcome to the discussion thread for the League of Ireland"
         " Premier Division. Remember to follow the subreddit rules and be"
