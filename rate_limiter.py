@@ -64,7 +64,7 @@ class APIRateLimiter:
                         self.daily_calls = stats.get("daily_calls", 0)
                         self.daily_reset_time = last_reset
             except (json.JSONDecodeError, ValueError, OSError) as e:
-                logger.warning(f"Could not load API stats: {e}")
+                logger.warning("Could not load API stats: %s", e)
                 self.daily_calls = 0
                 self.daily_reset_time = datetime.now()
 
@@ -79,7 +79,7 @@ class APIRateLimiter:
             with open(self.stats_file, "w", encoding="utf-8") as f:
                 json.dump(stats, f)
         except OSError as e:
-            logger.warning(f"Could not save API stats: {e}")
+            logger.warning("Could not save API stats: %s", e)
 
     def _reset_daily_if_needed(self) -> None:
         """Reset daily counter if a new day has started."""
@@ -287,12 +287,14 @@ class APIClient:
             except requests.exceptions.Timeout as e:
                 last_exception = e
                 logger.warning(
-                    f"Timeout on attempt "
-                    f"{attempt}/{self.rate_limiter.max_retries}: {e}"
+                    "Timeout on attempt %s/%s: %s",
+                    attempt,
+                    self.rate_limiter.max_retries,
+                    e
                 )
                 if attempt < self.rate_limiter.max_retries:
                     backoff = self.rate_limiter.get_backoff_time(attempt)
-                    logger.info(f"Retrying in {backoff} seconds...")
+                    logger.info("Retrying in %s seconds...", backoff)
                     time.sleep(backoff)
 
             except requests.exceptions.HTTPError as e:
@@ -305,13 +307,16 @@ class APIClient:
                     raise
 
                 logger.warning(
-                    f"HTTP error {status_code} on attempt "
-                    f"{attempt}/{self.rate_limiter.max_retries}: {e}"
+                    "HTTP error %s on attempt %s/%s: %s",
+                    status_code,
+                    attempt,
+                    self.rate_limiter.max_retries,
+                    e
                 )
 
                 if attempt < self.rate_limiter.max_retries:
                     backoff = self.rate_limiter.get_backoff_time(attempt)
-                    logger.info(f"Retrying in {backoff} seconds...")
+                    logger.info("Retrying in %s seconds...", backoff)
                     time.sleep(backoff)
                 else:
                     self.rate_limiter.record_failure()
@@ -319,12 +324,14 @@ class APIClient:
             except requests.exceptions.RequestException as e:
                 last_exception = e
                 logger.warning(
-                    f"Request error on attempt "
-                    f"{attempt}/{self.rate_limiter.max_retries}: {e}"
+                    "Request error on attempt %s/%s: %s",
+                    attempt,
+                    self.rate_limiter.max_retries,
+                    e
                 )
                 if attempt < self.rate_limiter.max_retries:
                     backoff = self.rate_limiter.get_backoff_time(attempt)
-                    logger.info(f"Retrying in {backoff} seconds...")
+                    logger.info("Retrying in %s seconds...", backoff)
                     time.sleep(backoff)
                 else:
                     self.rate_limiter.record_failure()

@@ -3,7 +3,7 @@ Matchbot by Ryan Deering (github.com/ryandeering)
 Used for the League of Ireland subreddit
 """
 
-from datetime import datetime, timedelta
+from datetime import datetime
 from tabulate import tabulate
 import praw
 import requests
@@ -18,6 +18,8 @@ from common import (
     format_live_fixture,
     load_cache,
     save_cache,
+    filter_weekly_matches,
+    get_match_date_range,
 )
 
 LEAGUE_ID = 357
@@ -182,16 +184,7 @@ def main():
         gameweek_number = int(current_gameweek.split(" ")[-1])
 
         all_matches = get_matches_for_gameweek(current_gameweek)
-
-        # Filter to next 7 days only
-        today_date = today.date()
-        week_end = today_date + timedelta(days=7)
-        weekly_matches = [
-            m for m in all_matches
-            if (today_date <=
-                parse_match_datetime(m["fixture"]["date"]).date() <=
-                week_end)
-        ]
+        weekly_matches = filter_weekly_matches(all_matches, today.date())
 
         if not weekly_matches:
             print(
@@ -200,14 +193,7 @@ def main():
             )
             return
 
-        first_match_date = min(
-            parse_match_datetime(m["fixture"]["date"]).date()
-            for m in weekly_matches
-        )
-        last_match_date = max(
-            parse_match_datetime(m["fixture"]["date"]).date()
-            for m in weekly_matches
-        )
+        first_match_date, last_match_date = get_match_date_range(weekly_matches)
 
         title = (
             f"LOI Premier Division - Match Thread / "

@@ -4,7 +4,7 @@ Just for common code shared bettwen our modules.
 
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from typing import Dict, List, Tuple, Any
 
@@ -308,3 +308,42 @@ def format_scorers_inline(fixture: Dict[str, Any]) -> str:
         return parts[0]
 
     return ""
+
+
+def filter_weekly_matches(all_matches, today_date):
+    """Filter matches to next 7 days.
+
+    Args:
+        all_matches: List of match fixtures from API
+        today_date: Today's date (datetime.date object)
+
+    Returns:
+        List of matches within the next 7 days
+    """
+    week_end = today_date + timedelta(days=7)
+    return [
+        m for m in all_matches
+        if (today_date <=
+            parse_match_datetime(m["fixture"]["date"]).date() <=
+            week_end)
+    ]
+
+
+def get_match_date_range(matches):
+    """Get first and last match dates from list.
+
+    Args:
+        matches: List of match fixtures
+
+    Returns:
+        Tuple of (first_match_date, last_match_date)
+    """
+    first_date = min(
+        parse_match_datetime(m["fixture"]["date"]).date()
+        for m in matches
+    )
+    last_date = max(
+        parse_match_datetime(m["fixture"]["date"]).date()
+        for m in matches
+    )
+    return first_date, last_date
