@@ -13,11 +13,8 @@ from datetime import datetime
 class TestPremierDivisionIntegration:
     """Integration tests for Premier Division posting workflow."""
 
-    @patch('premier_division.requests.get')
-    @patch('premier_division.praw.Reddit')
-    def test_weekly_thread_creation_flow(self, mock_reddit, mock_requests):
-        """Test complete flow: fetch data → build post → submit → cache."""
-        # Mock API responses
+    def _setup_api_mocks(self, mock_requests):
+        """Setup mock API responses."""
         mock_gameweek_response = Mock()
         mock_gameweek_response.json.return_value = {
             "response": ["Regular Season - 10"]
@@ -66,16 +63,22 @@ class TestPremierDivisionIntegration:
             }]
         }
 
-        def get_side_effect(url, **kwargs):
+        def get_side_effect(url, **_):
             if 'rounds' in url:
                 return mock_gameweek_response
-            elif 'fixtures' in url:
+            if 'fixtures' in url:
                 return mock_fixtures_response
-            elif 'standings' in url:
+            if 'standings' in url:
                 return mock_standings_response
             raise ValueError(f"Unexpected URL: {url}")
 
         mock_requests.side_effect = get_side_effect
+
+    @patch('premier_division.requests.get')
+    @patch('premier_division.praw.Reddit')
+    def test_weekly_thread_creation_flow(self, mock_reddit, mock_requests):
+        """Test complete flow: fetch data → build post → submit → cache."""
+        self._setup_api_mocks(mock_requests)
 
         mock_post = Mock()
         mock_post.id = "test123"
@@ -413,7 +416,7 @@ class TestErrorRecovery:
         self,
         mock_load_cache,
         mock_get_fixtures,
-        mock_get_table,
+        _,
         mock_update_post
     ):
         """Test that API failures are handled by returning empty list."""

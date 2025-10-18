@@ -162,8 +162,6 @@ class TestLiveUpdaterIntegration(unittest.TestCase):
         mock_update_post,
     ):
         """Test updating Premier Division thread."""
-        from datetime import date
-
         today = date.today().isoformat()
         mock_load_cache.return_value = {
             "premier_division": {
@@ -205,8 +203,6 @@ class TestLiveUpdaterIntegration(unittest.TestCase):
         self, mock_get_fixtures, mock_load_cache
     ):
         """Test handling fixtures from multiple leagues."""
-        from datetime import date
-
         today = date.today().isoformat()
         mock_load_cache.return_value = {
             "premier_division": {
@@ -292,8 +288,6 @@ class TestLiveUpdaterErrorHandling(unittest.TestCase):
         self, mock_get_fixtures, mock_load_cache
     ):
         """Test handling when no live fixtures returned."""
-        from datetime import date
-
         today = date.today().isoformat()
         mock_load_cache.return_value = {
             "premier_division": {
@@ -321,8 +315,6 @@ class TestLiveUpdaterErrorHandling(unittest.TestCase):
         mock_update_post,
     ):
         """Test updater continues if one post update fails."""
-        from datetime import date
-
         today = date.today().isoformat()
         mock_load_cache.return_value = {
             "premier_division": {
