@@ -15,6 +15,11 @@ from common import (
     ordinal_suffix,
     get_last_matches,
     parse_match_datetime,
+    format_live_fixture,
+    load_cache,
+    save_cache,
+    filter_weekly_matches,
+    get_match_date_range,
 )
 
 LEAGUE_ID = 357
@@ -84,7 +89,7 @@ def get_league_table():
 
 
 def submit_reddit_post(title, body):
-    """Submit a post to the subreddit."""
+    """Submit a post to the subreddit and return the post ID."""
     reddit = praw.Reddit(
         client_id=config.client_id,
         client_secret=config.client_secret,
@@ -101,6 +106,8 @@ def submit_reddit_post(title, body):
     post.mod.suggested_sort(sort="new")
     post.mod.sticky()
 
+    return post.id
+
 
 def build_post_body(matches_data, league_table, gameweek_number):
     """Build the body text for the Reddit post."""
@@ -110,28 +117,21 @@ def build_post_body(matches_data, league_table, gameweek_number):
         date = match["fixture"]["date"][:10]
         matches_by_date.setdefault(date, []).append(match)
 
-    body = ""
+    body = "*Live scores will be updated during matches*\n\n"
+
     for date, matches_list in sorted(matches_by_date.items()):
         date_extracted = datetime.strptime(date, "%Y-%m-%d")
         date_header = date_extracted.strftime(
             f"%A, %B {ordinal_suffix(date_extracted.day)}"
         )
-        section_header = f"##{date_header}\n\n"
+        section_header = f"## {date_header}\n\n"
 
-        matches = [
-            [
-                normalise_team_name(match["teams"]["home"]["name"]),
-                parse_match_datetime(match["fixture"]["date"]).strftime("%H:%M"),
-                normalise_team_name(match["teams"]["away"]["name"]),
-                match["fixture"]["venue"]["name"],
-            ]
-            for match in matches_list
-        ]
+        matches = [format_live_fixture(match) for match in matches_list]
 
-        body += (
-            f"{section_header}"
-            f"{tabulate(matches, headers=match_table_headers, tablefmt='pipe')}\n\n"
+        match_table = tabulate(
+            matches, headers=match_table_headers, tablefmt='pipe'
         )
+        body += f"{section_header}{match_table}\n\n"
 
     table_data = [
         [
@@ -152,7 +152,10 @@ def build_post_body(matches_data, league_table, gameweek_number):
 
     if gameweek_number - 1 > 0:
         body += f"## League Table, as of Round {gameweek_number - 1}\n\n"
-        body += f"{tabulate(table_data, headers=table_headers, tablefmt='pipe')}\n\n"
+        standings_table = tabulate(
+            table_data, headers=table_headers, tablefmt='pipe'
+        )
+        body += f"{standings_table}\n\n"
 
     body += (
         "\n\n Welcome to the discussion thread for the League of Ireland"
@@ -168,28 +171,57 @@ def build_post_body(matches_data, league_table, gameweek_number):
 
 
 def main():
-    """Main function."""
+    """Main function: post weekly thread on Friday."""
     today = datetime.now()
+
+    # Only post on Fridays
+    if today.weekday() != 4:  # 4 = Friday
+        print(f"Not Friday (today is {today.strftime('%A')}), exiting.")
+        return
 
     try:
         current_gameweek = get_current_gameweek()
         gameweek_number = int(current_gameweek.split(" ")[-1])
 
-        matches = get_matches_for_gameweek(current_gameweek)
+        all_matches = get_matches_for_gameweek(current_gameweek)
+        weekly_matches = filter_weekly_matches(all_matches, today.date())
 
-        first_match_date = matches[0]["fixture"]["date"][:10]
-        if first_match_date != today.strftime("%Y-%m-%d"):
+        if not weekly_matches:
+            print(
+                f"No matches in next 7 days for round "
+                f"{gameweek_number}, exiting."
+            )
             return
 
+        first_match_date, last_match_date = get_match_date_range(weekly_matches)
+
         title = (
-            f"LOI Premier Division - Round {gameweek_number} Discussion Thread / "
-            f"{today.strftime('%d-%m-%Y')}"
+            f"LOI Premier Division - Match Thread / "
+            f"{first_match_date.strftime('%d-%m-%Y')} to {last_match_date.strftime('%d-%m-%Y')}"
         )
 
         league_table = get_league_table()
-        body = build_post_body(matches, league_table, gameweek_number)
+        body = build_post_body(weekly_matches, league_table, gameweek_number)
 
-        submit_reddit_post(title, body)
+        post_id = submit_reddit_post(title, body)
+
+        # Save post metadata to cache for live updater
+        cache = load_cache()
+        match_dates = sorted({
+            parse_match_datetime(m["fixture"]["date"]).date().isoformat()
+            for m in weekly_matches
+        })
+
+        cache["premier_division"] = {
+            "post_id": post_id,
+            "match_dates": match_dates,
+            "round": current_gameweek,
+            "posted_at": today.isoformat()
+        }
+        save_cache(cache)
+
+        print(f"Posted Premier Division thread: {post_id}")
+        print(f"Match dates: {match_dates}")
 
     except requests.exceptions.RequestException as request_exception:
         print(f"Error running main function: {request_exception}")

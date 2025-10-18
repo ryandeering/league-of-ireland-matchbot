@@ -1,0 +1,37 @@
+[MASTER]
+# Specify a configuration file.
+ignore-patterns=test_.*?py
+
+[MESSAGES CONTROL]
+# C0415: Import outside toplevel - standard for tests
+# R0903: Too few public methods - config/utility classes
+# R0902: Too many instance attributes - necessary for config/rate limiter
+# R0913: Too many arguments - by design for flexibility
+# R0912: Too many branches - complex but necessary logic
+# R0904: Too many public methods - comprehensive test coverage
+# R0801: Similar lines - acceptable across bot scripts
+disable=
+    import-outside-toplevel,
+    too-few-public-methods,
+    too-many-instance-attributes,
+    too-many-arguments,
+    too-many-branches,
+    too-many-public-methods,
+    duplicate-code
+
+[DESIGN]
+# Maximum number of locals for function / method body
+max-locals=16
+
+# Maximum number of branches for function / method body
+max-branches=13
+
+# Maximum number of arguments for function / method
+max-args=6
+
+# Maximum number of instance attributes
+max-attributes=11
+
+[SIMILARITIES]
+# Minimum lines number d a similarity to note
+min-similarity-lines=5

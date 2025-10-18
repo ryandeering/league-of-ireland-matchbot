@@ -3,12 +3,18 @@ Matchbot by Ryan Deering (github.com/ryandeering)
 Used for the League of Ireland subreddit
 """
 
-from datetime import datetime, timedelta
+from datetime import datetime
 from tabulate import tabulate
 import praw
 import requests
 from matchbot_config import MatchbotConfig
-from common import normalised_team_names
+from common import (
+    parse_match_datetime,
+    format_live_fixture,
+    match_table_headers,
+    load_cache,
+    save_cache,
+)
 
 TOURNAMENT_ID = 359
 SEASON = datetime.now().year
@@ -58,7 +64,7 @@ def get_matches_for_round(current_round):
 
 
 def submit_reddit_post(title, body):
-    """Submit a post to the subreddit."""
+    """Submit a post to the subreddit and return the post ID."""
     reddit = praw.Reddit(
         client_id=config.client_id,
         client_secret=config.client_secret,
@@ -75,47 +81,38 @@ def submit_reddit_post(title, body):
     post.mod.suggested_sort(sort="new")
     post.mod.sticky()
 
+    return post.id
+
 
 def build_post_body(matches_data, current_round):
     """Build the body text for the Reddit post."""
-    match_table_headers = ["Home Team", "Kickoff", "Away Team", "Ground"]
 
     matches_by_date = {}
     for match in matches_data:
         date = match["fixture"]["date"][:10]
         matches_by_date.setdefault(date, []).append(match)
 
-    body = f"## {current_round}\n\n"
+    body = (
+        f"*Live scores will be updated during matches*\n\n"
+        f"## {current_round}\n\n"
+    )
+
     for date, matches_list in sorted(matches_by_date.items()):
         date_extracted = datetime.strptime(date, "%Y-%m-%d")
         date_header = date_extracted.strftime(f"%A, %B {date_extracted.day}")
         section_header = f"### {date_header}\n\n"
 
-        matches = [
-            [
-                normalised_team_names.get(
-                    match["teams"]["home"]["name"], match["teams"]["home"]["name"]
-                ),
-                (
-                    datetime.fromisoformat(match["fixture"]["date"])
-                    + timedelta(hours=1)
-                ).strftime("%H:%M"),
-                normalised_team_names.get(
-                    match["teams"]["away"]["name"], match["teams"]["away"]["name"]
-                ),
-                match["fixture"]["venue"]["name"],
-            ]
-            for match in matches_list
-        ]
+        matches = [format_live_fixture(match) for match in matches_list]
 
-        body += (
-            f"{section_header}"
-            f"{tabulate(matches, headers=match_table_headers, tablefmt='pipe')}\n\n"
+        match_table = tabulate(
+            matches, headers=match_table_headers, tablefmt='pipe'
         )
+        body += f"{section_header}{match_table}\n\n"
 
     body += (
-        "\n\n Welcome to the discussion thread for the Sports Direct FAI Cup. "
-        "Remember to follow the subreddit rules and be civil to each other. Enjoy the game. \n\n"
+        "\n\n Welcome to the discussion thread for the Sports Direct "
+        "FAI Cup. Remember to follow the subreddit rules and be civil "
+        "to each other. Enjoy the game. \n\n"
     )
 
     body += (
@@ -146,7 +143,25 @@ def main():
 
         body = build_post_body(matches, current_round)
 
-        submit_reddit_post(title, body)
+        post_id = submit_reddit_post(title, body)
+
+        # Save post metadata to cache for live updater
+        cache = load_cache()
+        match_dates = sorted({
+            parse_match_datetime(m["fixture"]["date"]).date().isoformat()
+            for m in matches
+        })
+
+        cache["fai_cup"] = {
+            "post_id": post_id,
+            "match_dates": match_dates,
+            "round": current_round,
+            "posted_at": today.isoformat()
+        }
+        save_cache(cache)
+
+        print(f"Posted FAI Cup thread: {post_id}")
+        print(f"Match dates: {match_dates}")
 
     except requests.exceptions.RequestException as request_exception:
         print(f"Error running main function: {request_exception}")
