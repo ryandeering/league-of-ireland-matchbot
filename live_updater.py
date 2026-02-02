@@ -21,6 +21,7 @@ from common import (
     get_last_matches,
     format_live_fixture,
     load_cache,
+    save_cache,
 )
 from match_client import (
     MatchDataClient,
@@ -410,6 +411,74 @@ def update_league_thread(
     update_reddit_post(post_id, new_body)
 
 
+def _get_todays_fixtures(today, league_ids):
+    """Fetch all fixtures for today (started or not).
+
+    Args:
+        today: Today's date
+        league_ids: List of league IDs to check
+
+    Returns:
+        List of today's fixtures
+    """
+    todays_fixtures = []
+    today_str = today.isoformat()
+
+    for league_id in league_ids:
+        fixtures = get_league_fixtures(league_id)
+        for fixture in fixtures:
+            fixture_date = fixture.get("fixture", {}).get("date", "")[:10]
+            if fixture_date == today_str:
+                todays_fixtures.append(fixture)
+
+    return todays_fixtures
+
+
+def _cleanup_finished_match_day(cache, today):
+    """Remove today from cache if all matches have finished.
+
+    Args:
+        cache: The current cache dictionary
+        today: Today's date
+    """
+    league_ids = [LEAGUE_ID_PREMIER, LEAGUE_ID_FIRST, LEAGUE_ID_FAI_CUP]
+    todays_fixtures = _get_todays_fixtures(today, league_ids)
+
+    if not todays_fixtures:
+        logger.info("No fixtures found for today.")
+        return
+
+    started_fixtures = [
+        f for f in todays_fixtures
+        if f.get("fixture", {}).get("status", {}).get("short") not in ["TBD", "NS"]
+    ]
+
+    if not started_fixtures:
+        logger.info("Today's matches haven't started yet.")
+        return
+
+    all_finished = all(
+        f.get("fixture", {}).get("status", {}).get("short") == "FT"
+        for f in started_fixtures
+    )
+
+    if all_finished:
+        logger.info("All of today's matches have finished.")
+        today_str = today.isoformat()
+        cache_updated = False
+        for comp_name in ["premier_division", "first_division", "fai_cup"]:
+            if comp_name in cache:
+                match_dates = cache[comp_name].get("match_dates", [])
+                if today_str in match_dates:
+                    match_dates.remove(today_str)
+                    cache_updated = True
+                    logger.info("Removed %s from %s match_dates", today_str, comp_name)
+        if cache_updated:
+            save_cache(cache)
+    else:
+        logger.info("Some matches still in progress or not yet finished.")
+
+
 def main():
     """Main function - fetch live scores and update Reddit posts."""
     today = datetime.now().date()
@@ -435,7 +504,8 @@ def main():
     live_fixtures = get_live_fixtures(league_ids)
 
     if not live_fixtures:
-        logger.info("No live fixtures found.")
+        logger.info("No live fixtures found, checking if today's matches finished.")
+        _cleanup_finished_match_day(cache, today)
         return
 
     logger.info("Found %d live fixtures", len(live_fixtures))
@@ -468,14 +538,7 @@ def main():
                 league_id
             )
 
-    all_finished = all(
-        f["fixture"]["status"]["short"] == "FT" for f in live_fixtures
-    )
-
-    if all_finished:
-        logger.info("All matches finished.")
-    else:
-        logger.info("Some matches still in progress. Next poll in %ss.", next_poll)
+    logger.info("Updated threads. Next poll in %ss.", next_poll)
 
 
 if __name__ == "__main__":

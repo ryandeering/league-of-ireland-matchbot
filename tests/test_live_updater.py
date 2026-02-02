@@ -279,13 +279,158 @@ class TestLiveUpdaterIntegration(unittest.TestCase):
         self.assertEqual(len(fixtures_by_league[219]), 1)
 
 
+class TestCleanupFinishedMatchDay(unittest.TestCase):
+    """Test cache cleanup when matches finish."""
+
+    @patch("live_updater.save_cache")
+    @patch("live_updater.get_league_fixtures")
+    def test_cleanup_when_all_matches_finished(
+        self, mock_get_fixtures, mock_save_cache
+    ):
+        """Test cache cleanup when all today's matches are finished."""
+        from live_updater import _cleanup_finished_match_day
+
+        today = date.today()
+        today_str = today.isoformat()
+
+        cache = {
+            "premier_division": {
+                "post_id": "test123",
+                "match_dates": [today_str, "2026-02-07"],
+            }
+        }
+
+        # All matches finished (FT)
+        mock_get_fixtures.return_value = [
+            {
+                "fixture": {
+                    "date": f"{today_str}T19:45:00+00:00",
+                    "status": {"short": "FT"},
+                },
+                "league": {"id": 126},
+            },
+            {
+                "fixture": {
+                    "date": f"{today_str}T19:45:00+00:00",
+                    "status": {"short": "FT"},
+                },
+                "league": {"id": 126},
+            },
+        ]
+
+        _cleanup_finished_match_day(cache, today)
+
+        # Should have removed today from match_dates
+        self.assertNotIn(today_str, cache["premier_division"]["match_dates"])
+        self.assertIn("2026-02-07", cache["premier_division"]["match_dates"])
+        mock_save_cache.assert_called_once()
+
+    @patch("live_updater.save_cache")
+    @patch("live_updater.get_league_fixtures")
+    def test_no_cleanup_when_matches_not_started(
+        self, mock_get_fixtures, mock_save_cache
+    ):
+        """Test no cleanup when matches haven't started yet."""
+        from live_updater import _cleanup_finished_match_day
+
+        today = date.today()
+        today_str = today.isoformat()
+
+        cache = {
+            "premier_division": {
+                "post_id": "test123",
+                "match_dates": [today_str],
+            }
+        }
+
+        # Matches not started (NS)
+        mock_get_fixtures.return_value = [
+            {
+                "fixture": {
+                    "date": f"{today_str}T19:45:00+00:00",
+                    "status": {"short": "NS"},
+                },
+                "league": {"id": 126},
+            },
+        ]
+
+        _cleanup_finished_match_day(cache, today)
+
+        # Should NOT have removed today
+        self.assertIn(today_str, cache["premier_division"]["match_dates"])
+        mock_save_cache.assert_not_called()
+
+    @patch("live_updater.save_cache")
+    @patch("live_updater.get_league_fixtures")
+    def test_no_cleanup_when_matches_in_progress(
+        self, mock_get_fixtures, mock_save_cache
+    ):
+        """Test no cleanup when some matches still in progress."""
+        from live_updater import _cleanup_finished_match_day
+
+        today = date.today()
+        today_str = today.isoformat()
+
+        cache = {
+            "premier_division": {
+                "post_id": "test123",
+                "match_dates": [today_str],
+            }
+        }
+
+        # Mixed: one finished, one in progress
+        mock_get_fixtures.return_value = [
+            {
+                "fixture": {
+                    "date": f"{today_str}T19:45:00+00:00",
+                    "status": {"short": "FT"},
+                },
+                "league": {"id": 126},
+            },
+            {
+                "fixture": {
+                    "date": f"{today_str}T20:00:00+00:00",
+                    "status": {"short": "2H"},
+                },
+                "league": {"id": 126},
+            },
+        ]
+
+        _cleanup_finished_match_day(cache, today)
+
+        # Should NOT have removed today
+        self.assertIn(today_str, cache["premier_division"]["match_dates"])
+        mock_save_cache.assert_not_called()
+
+    @patch("live_updater.get_league_fixtures")
+    def test_get_todays_fixtures_filters_correctly(self, mock_get_fixtures):
+        """Test _get_todays_fixtures filters to today only."""
+        from live_updater import _get_todays_fixtures
+
+        today = date.today()
+        today_str = today.isoformat()
+
+        mock_get_fixtures.return_value = [
+            {"fixture": {"date": f"{today_str}T19:45:00+00:00"}},
+            {"fixture": {"date": "2026-02-07T19:45:00+00:00"}},
+            {"fixture": {"date": f"{today_str}T20:00:00+00:00"}},
+        ]
+
+        result = _get_todays_fixtures(today, [126])
+
+        self.assertEqual(len(result), 2)
+        for fixture in result:
+            self.assertTrue(fixture["fixture"]["date"].startswith(today_str))
+
+
 class TestLiveUpdaterErrorHandling(unittest.TestCase):
     """Test live updater error handling."""
 
+    @patch("live_updater._cleanup_finished_match_day")
     @patch("live_updater.load_cache")
     @patch("live_updater.get_live_fixtures")
     def test_handles_empty_live_fixtures(
-        self, mock_get_fixtures, mock_load_cache
+        self, mock_get_fixtures, mock_load_cache, mock_cleanup
     ):
         """Test handling when no live fixtures returned."""
         today = date.today().isoformat()
@@ -300,8 +445,9 @@ class TestLiveUpdaterErrorHandling(unittest.TestCase):
 
         from live_updater import main
 
-        # Should handle gracefully
+        # Should handle gracefully and call cleanup
         main()
+        mock_cleanup.assert_called_once()
 
     @patch("live_updater.update_reddit_post")
     @patch("live_updater.get_league_table")
