@@ -4,9 +4,11 @@ Used for the League of Ireland subreddit
 """
 
 from datetime import datetime
+from zoneinfo import ZoneInfo
+
 from tabulate import tabulate
 import praw
-import requests
+
 from matchbot_config import MatchbotConfig
 from common import (
     parse_match_datetime,
@@ -15,52 +17,83 @@ from common import (
     load_cache,
     save_cache,
 )
-
-TOURNAMENT_ID = 359
-SEASON = datetime.now().year
+from match_client import (
+    MatchDataClient,
+    LEAGUE_ID_FAI_CUP,
+    convert_raw_match,
+)
 
 config = MatchbotConfig()
+client = MatchDataClient()
 
 
-def get_current_round():
-    """Return the current round."""
-    try:
-        response = requests.get(
-            f"{config.base_url}/fixtures/rounds",
-            params={
-                "league": TOURNAMENT_ID,
-                "current": "true",
-                "season": SEASON,
-            },
-            headers=config.headers,
-            timeout=5,
-        )
-        response.raise_for_status()
-        data = response.json()
-        return data["response"][0]
-    except requests.exceptions.RequestException as request_exception:
-        print(f"Error getting current round: {request_exception}")
-        raise
+def get_current_round(matches):
+    """Determine current round from matches.
+
+    Args:
+        matches: List of match fixtures
+
+    Returns:
+        Round name string (e.g., "Quarter-finals")
+    """
+    now = datetime.now(ZoneInfo("UTC"))
+
+    # Find the next upcoming match to get the current round
+    for match in sorted(matches, key=lambda m: m["fixture"]["date"]):
+        match_date = parse_match_datetime(match["fixture"]["date"])
+        if match_date >= now:
+            round_info = match.get("league", {}).get("round", "")
+            if round_info:
+                # Extract just the round name (e.g., "Quarter-finals")
+                if " - " in round_info:
+                    return round_info.split(" - ")[-1]
+                return round_info
+
+    # Fallback: use the last match's round
+    if matches:
+        round_info = matches[-1].get("league", {}).get("round", "FAI Cup")
+        if " - " in round_info:
+            return round_info.split(" - ")[-1]
+        return round_info
+
+    return "FAI Cup"
 
 
-def get_matches_for_round(current_round):
-    """Return matches for the current round."""
-    try:
-        response = requests.get(
-            f"{config.base_url}/fixtures",
-            params={
-                "league": TOURNAMENT_ID,
-                "season": SEASON,
-                "round": current_round,
-            },
-            headers=config.headers,
-            timeout=5,
-        )
-        response.raise_for_status()
-        return response.json()["response"]
-    except requests.exceptions.RequestException as request_exception:
-        print(f"Error getting matches for round: {request_exception}")
-        raise
+def get_matches_for_cup():
+    """Fetch all matches for FAI Cup.
+
+    Returns:
+        List of match fixtures in api-football compatible format
+    """
+    matches = []
+
+    fixtures_data = client.get_league_matches(LEAGUE_ID_FAI_CUP, tab="fixtures")
+    for match in client.extract_matches(fixtures_data):
+        match["_league_id"] = LEAGUE_ID_FAI_CUP
+        matches.append(convert_raw_match(match))
+
+    results_data = client.get_league_matches(LEAGUE_ID_FAI_CUP, tab="results")
+    for match in client.extract_matches(results_data):
+        match["_league_id"] = LEAGUE_ID_FAI_CUP
+        matches.append(convert_raw_match(match))
+
+    return matches
+
+
+def get_matches_for_round(matches, current_round):
+    """Filter matches to only include current round.
+
+    Args:
+        matches: All cup matches
+        current_round: Current round name
+
+    Returns:
+        List of matches in the current round
+    """
+    return [
+        m for m in matches
+        if current_round in m.get("league", {}).get("round", "")
+    ]
 
 
 def submit_reddit_post(title, body):
@@ -85,8 +118,10 @@ def submit_reddit_post(title, body):
 
 
 def build_post_body(matches_data, current_round):
-    """Build the body text for the Reddit post."""
+    """Build the body text for the Reddit post.
 
+    All matches in one table with scorers in a column.
+    """
     matches_by_date = {}
     for match in matches_data:
         date = match["fixture"]["date"][:10]
@@ -100,14 +135,13 @@ def build_post_body(matches_data, current_round):
     for date, matches_list in sorted(matches_by_date.items()):
         date_extracted = datetime.strptime(date, "%Y-%m-%d")
         date_header = date_extracted.strftime(f"%A, %B {date_extracted.day}")
-        section_header = f"### {date_header}\n\n"
+        body += f"### {date_header}\n\n"
 
-        matches = [format_live_fixture(match) for match in matches_list]
-
+        match_rows = [format_live_fixture(match) for match in matches_list]
         match_table = tabulate(
-            matches, headers=match_table_headers, tablefmt='pipe'
+            match_rows, headers=match_table_headers, tablefmt='pipe'
         )
-        body += f"{section_header}{match_table}\n\n"
+        body += f"{match_table}\n\n"
 
     body += (
         "\n\n Welcome to the discussion thread for the Sports Direct "
@@ -125,15 +159,22 @@ def build_post_body(matches_data, current_round):
 
 def main():
     """Main function."""
-    today = datetime.now()
+    now = datetime.now(ZoneInfo("Europe/Dublin"))
+    today = now.date()
 
     try:
-        current_round = get_current_round()
+        all_matches = get_matches_for_cup()
+        current_round = get_current_round(all_matches)
 
-        matches = get_matches_for_round(current_round)
+        round_matches = get_matches_for_round(all_matches, current_round)
 
-        first_match_date = matches[0]["fixture"]["date"][:10]
+        if not round_matches:
+            print(f"No matches found for round: {current_round}")
+            return
+
+        first_match_date = round_matches[0]["fixture"]["date"][:10]
         if first_match_date != today.strftime("%Y-%m-%d"):
+            print(f"First match is on {first_match_date}, not today. Exiting.")
             return
 
         title = (
@@ -141,7 +182,7 @@ def main():
             f"{today.strftime('%d-%m-%Y')}"
         )
 
-        body = build_post_body(matches, current_round)
+        body = build_post_body(round_matches, current_round)
 
         post_id = submit_reddit_post(title, body)
 
@@ -149,22 +190,22 @@ def main():
         cache = load_cache()
         match_dates = sorted({
             parse_match_datetime(m["fixture"]["date"]).date().isoformat()
-            for m in matches
+            for m in round_matches
         })
 
         cache["fai_cup"] = {
             "post_id": post_id,
             "match_dates": match_dates,
             "round": current_round,
-            "posted_at": today.isoformat()
+            "posted_at": now.isoformat()
         }
         save_cache(cache)
 
         print(f"Posted FAI Cup thread: {post_id}")
         print(f"Match dates: {match_dates}")
 
-    except requests.exceptions.RequestException as request_exception:
-        print(f"Error running main function: {request_exception}")
+    except Exception as e:
+        print(f"Error running main function: {e}")
         raise
 
 

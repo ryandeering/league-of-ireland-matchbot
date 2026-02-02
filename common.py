@@ -16,7 +16,7 @@ normalised_team_names = {
     "Wexford": "Wexford FC",
 }
 
-match_table_headers = ["Home Team", "Score", "Away Team", "Ground", "Status"]
+match_table_headers = ["Home Team", "Score", "Away Team", "Ground", "Status", "Kickoff", "Scorers"]
 
 
 table_headers = [
@@ -76,8 +76,8 @@ def get_last_matches(team_id: int, league_table: List[Dict[str, Any]]) -> str:
     """
     last_matches = 5
     team_form = next(
-        (team["form"] for team in league_table
-         if team["team"]["id"] == team_id),
+        (team.get("form", "") for team in league_table
+         if team.get("team", {}).get("id") == team_id),
         None
     )
     if team_form:
@@ -122,19 +122,17 @@ def get_match_status_display(fixture: Dict[str, Any]) -> Tuple[str, str]:
         Tuple of (score_display, status_display)
         Examples: ("2-1", "45'"), ("vs", "19:45"), ("1-0", "FT")
     """
-    # Defensive null-checking for API response structure
     status = fixture.get("fixture", {}).get("status", {}).get("short", "NS")
     elapsed = fixture.get("fixture", {}).get("status", {}).get("elapsed")
     home_score = fixture.get("goals", {}).get("home", 0)
     away_score = fixture.get("goals", {}).get("away", 0)
 
-    # Ensure scores are not None (API can return null during pre-match)
+    # API can return null scores during pre-match
     home_score = home_score if home_score is not None else 0
     away_score = away_score if away_score is not None else 0
 
     score_display = f"{home_score}-{away_score}"
 
-    # Get kickoff time with null-safety
     fixture_date = fixture.get("fixture", {}).get("date")
     if fixture_date:
         kickoff_time = parse_match_datetime(fixture_date).strftime("%H:%M")
@@ -155,6 +153,8 @@ def get_match_status_display(fixture: Dict[str, Any]) -> Tuple[str, str]:
         "FT": "FT",
         "AET": "AET",
         "PEN": "Pens",
+        "LIVE": f"{elapsed}'" if elapsed else "LIVE",
+        "CANC": "CANC",
     }
 
     if status in status_map:
@@ -164,6 +164,54 @@ def get_match_status_display(fixture: Dict[str, Any]) -> Tuple[str, str]:
     return "vs", status
 
 
+def format_scorers_compact(fixture: Dict[str, Any]) -> str:
+    """Format goal scorers as a compact string for table column.
+
+    Returns scorers in format: "Home scorers - Away scorers"
+    e.g., "Greene 23', 62' - Devoy P34'"
+    Groups multiple goals by the same player.
+
+    Args:
+        fixture: Fixture dictionary
+
+    Returns:
+        Compact scorer string, or empty string if no scorers
+    """
+    scorers = extract_scorers(fixture)
+
+    if not scorers["home"] and not scorers["away"]:
+        return ""
+
+    def format_list(scorer_list: List[Dict[str, Any]]) -> str:
+        # Group goals by player name
+        player_goals: Dict[str, List[str]] = {}
+        for s in scorer_list:
+            name = s["name"]
+            if s["own_goal"]:
+                minute_str = f"OG{s['minute']}'"
+            elif s["penalty"]:
+                minute_str = f"P{s['minute']}'"
+            else:
+                minute_str = f"{s['minute']}'"
+
+            if name not in player_goals:
+                player_goals[name] = []
+            player_goals[name].append(minute_str)
+
+        # Format as "Player min1', min2'" for multiple goals
+        parts = []
+        for name, minutes in player_goals.items():
+            parts.append(f"{name} {', '.join(minutes)}")
+        return ", ".join(parts)
+
+    home_str = format_list(scorers["home"])
+    away_str = format_list(scorers["away"])
+
+    if home_str and away_str:
+        return f"{home_str} - {away_str}"
+    return home_str or away_str
+
+
 def format_live_fixture(fixture: Dict[str, Any]) -> List[str]:
     """Format a fixture for display in match table with live score.
 
@@ -171,7 +219,7 @@ def format_live_fixture(fixture: Dict[str, Any]) -> List[str]:
         fixture: Fixture dictionary from API-Football
 
     Returns:
-        List: [home_team, score, away_team, venue, status]
+        List: [home_team, score, away_team, venue, status, kickoff, scorers]
     """
     home_team = normalise_team_name(
         fixture.get("teams", {}).get("home", {}).get("name", "Unknown")
@@ -182,7 +230,17 @@ def format_live_fixture(fixture: Dict[str, Any]) -> List[str]:
     venue = fixture.get("fixture", {}).get("venue", {}).get("name", "TBD")
     score, status = get_match_status_display(fixture)
 
-    return [home_team, score, away_team, venue, status]
+    # Always include kickoff time
+    fixture_date = fixture.get("fixture", {}).get("date")
+    if fixture_date:
+        kickoff = parse_match_datetime(fixture_date).strftime("%H:%M")
+    else:
+        kickoff = "TBD"
+
+    # Compact scorers for table column
+    scorers = format_scorers_compact(fixture)
+
+    return [home_team, score, away_team, venue, status, kickoff, scorers]
 
 
 def load_cache() -> Dict[str, Any]:
@@ -243,71 +301,6 @@ def extract_scorers(
             scorers["away"].append(scorer_info)
 
     return scorers
-
-
-def format_scorers_inline(fixture: Dict[str, Any]) -> str:
-    """Format goal scorers as a compact inline string (fully dynamic).
-
-    Returns scorers in format: "Team: Player (min'), Player (min') | Team: ..."
-    Only includes teams with goals. Returns empty string if no goals.
-
-    Precedence: Home team first, then away team (only if both have scored).
-    If only one team scored, shows that team only.
-
-    Args:
-        fixture: Fixture dictionary
-
-    Returns:
-        Formatted inline string, or empty string if no scorers
-    """
-    scorers = extract_scorers(fixture)
-
-    home_team = normalise_team_name(
-        fixture.get("teams", {}).get("home", {}).get("name", "Home")
-    )
-    away_team = normalise_team_name(
-        fixture.get("teams", {}).get("away", {}).get("name", "Away")
-    )
-
-    # Only show scorers if goals have been scored
-    if not scorers["home"] and not scorers["away"]:
-        return ""
-
-    parts = []
-
-    # Helper function to format scorer list
-    def format_scorer_list(scorer_list: List[Dict[str, Any]]) -> List[str]:
-        """Format a list of scorers."""
-        formatted = []
-        for scorer in scorer_list:
-            minute_str = f"{scorer['minute']}'"
-            if scorer["own_goal"]:
-                formatted.append(f"{scorer['name']} (OG {minute_str})")
-            elif scorer["penalty"]:
-                formatted.append(f"{scorer['name']} (P {minute_str})")
-            else:
-                formatted.append(f"{scorer['name']} ({minute_str})")
-        return formatted
-
-    # Home team scorers (show if any goals) - FIRST precedence
-    if scorers["home"]:
-        scorer_list = format_scorer_list(scorers["home"])
-        parts.append(f"**{home_team}:** {', '.join(scorer_list)}")
-
-    # Away team scorers (show if any goals) - SECOND precedence
-    if scorers["away"]:
-        scorer_list = format_scorer_list(scorers["away"])
-        parts.append(f"**{away_team}:** {', '.join(scorer_list)}")
-
-    # Dynamically build result
-    if len(parts) == 2:
-        # Both teams scored: show with pipe separator
-        return " | ".join(parts)
-    if len(parts) == 1:
-        # Only one team scored: show just that team
-        return parts[0]
-
-    return ""
 
 
 def filter_weekly_matches(all_matches, today_date):

@@ -170,11 +170,11 @@ class TestFormatLiveFixture(unittest.TestCase):
             },
         }
 
-    def test_format_returns_list_with_five_elements(self):
+    def test_format_returns_list_with_seven_elements(self):
         """Test that formatted fixture has all required columns."""
         formatted = format_live_fixture(self.fixture)
         self.assertIsInstance(formatted, list)
-        self.assertEqual(len(formatted), 5)
+        self.assertEqual(len(formatted), 7)  # Home, Score, Away, Venue, Status, Kickoff, Scorers
 
     def test_format_contains_team_names(self):
         """Test that team names are included."""

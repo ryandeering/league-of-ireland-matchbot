@@ -1,16 +1,17 @@
 """
-Live score updater for League of Ireland match threads
-Polls API-Football with adaptive frequency and rate limiting
-Updates Reddit posts with live scores and goal scorers
+Live score updater for League of Ireland match threads.
+Polls external API for live scores and updates Reddit posts.
 """
 
 import logging
 import time
 from datetime import datetime
-from typing import Dict, List, Any
+from typing import Any
+
 from tabulate import tabulate
 import praw
 import requests
+
 from matchbot_config import MatchbotConfig
 from common import (
     table_headers,
@@ -19,95 +20,147 @@ from common import (
     ordinal_suffix,
     get_last_matches,
     format_live_fixture,
-    format_scorers_inline,
     load_cache,
 )
-from rate_limiter import APIRateLimiter, APIClient
-
-# API Rate Limiting Configuration
-API_DAILY_LIMIT = 100  # API-Football free tier: 100 requests/day
-API_PER_MINUTE_LIMIT = 10  # Max requests per minute
-API_MAX_RETRIES = 3  # Number of retry attempts on failure
-CIRCUIT_BREAKER_THRESHOLD = 5  # Consecutive failures before circuit opens
-CIRCUIT_BREAKER_RECOVERY_SECONDS = 300  # 5 minutes recovery time
+from match_client import (
+    MatchDataClient,
+    LEAGUE_ID_PREMIER,
+    LEAGUE_ID_FIRST,
+    LEAGUE_ID_FAI_CUP,
+    convert_raw_match,
+    convert_raw_table,
+    convert_match_events,
+    extract_venue_from_details,
+)
+from rate_limiter import RateLimiter
 
 # Caching Configuration
 TABLE_CACHE_SECONDS = 1800  # Cache league tables for 30 minutes
 
-# League IDs
-LEAGUE_ID_PREMIER = 357
-LEAGUE_ID_FIRST = 358
-LEAGUE_ID_FAI_CUP = 359
-
 logger = logging.getLogger(__name__)
 config = MatchbotConfig()
-rate_limiter = APIRateLimiter(
-    daily_limit=API_DAILY_LIMIT,
-    per_minute_limit=API_PER_MINUTE_LIMIT,
-    max_retries=API_MAX_RETRIES,
-    circuit_breaker_threshold=CIRCUIT_BREAKER_THRESHOLD,
-    circuit_breaker_recovery_time=CIRCUIT_BREAKER_RECOVERY_SECONDS,
-)
+rate_limiter = RateLimiter()
 
 # Global cache for league tables
-_table_cache: Dict[int, Dict[str, Any]] = {}
+_table_cache: dict[int, dict[str, Any]] = {}
+
+# Match data client instance
+client = MatchDataClient()
 
 
-def get_live_fixtures(league_ids, api_client=None):
-    """
-    Fetch live fixtures for multiple leagues in a single API call.
+def _fetch_match_details(match_id: str) -> tuple[list[dict[str, Any]], str]:
+    """Fetch events and venue for a specific match.
 
     Args:
-        league_ids: list of league IDs to fetch (e.g., [357, 358, 359])
-        api_client: Optional APIClient instance. If None, uses direct requests.
+        match_id: Match ID to fetch details for
 
     Returns:
-        List of fixture dictionaries or empty list on failure
+        Tuple of (events list, venue name)
     """
-    league_ids_str = "-".join(str(lid) for lid in league_ids)
-
-    if api_client:
-        try:
-            response = api_client.call_with_retry(
-                "/fixtures",
-                params={"live": league_ids_str},
-                timeout=10,
-            )
-            return response.get("response", [])
-        except requests.exceptions.RequestException as e:
-            logger.error("Error fetching live fixtures: %s", e)
-            return []
-
-    # Fallback to direct requests if no api_client provided
     try:
-        response = requests.get(
-            f"{config.base_url}/fixtures",
-            params={"live": league_ids_str},
-            headers=config.headers,
-            timeout=10,
-        )
-        response.raise_for_status()
-        return response.json()["response"]
-    except requests.exceptions.RequestException as e:
-        logger.error("Error fetching live fixtures: %s", e)
-        return []
+        details = client.get_match_details(int(match_id))
+        if details:
+            events = convert_match_events(details)
+            venue = extract_venue_from_details(details)
+            return events, venue
+    except (ValueError, TypeError) as exc:
+        logger.warning("Could not fetch match details: %s", exc)
+    return [], ""
 
 
-def get_league_table(league_id: int) -> List[Dict[str, Any]]:
+def _is_live_match(match: dict[str, Any]) -> bool:
+    """Check if a match is currently live.
+
+    Args:
+        match: Raw match data
+
+    Returns:
+        True if match is live (started but not finished)
+    """
+    status = match.get("status", {})
+    return status.get("started") and not status.get("finished")
+
+
+def get_live_fixtures(league_ids: list[int]) -> list[dict[str, Any]]:
+    """
+    Fetch live fixtures for multiple leagues.
+
+    Args:
+        league_ids: list of league IDs to fetch
+
+    Returns:
+        List of fixture dictionaries in api-football compatible format
+    """
+    all_fixtures = []
+
+    for league_id in league_ids:
+        try:
+            data = client.get_league_matches(league_id, tab="fixtures")
+            matches = client.extract_matches(data)
+
+            for match in matches:
+                if not _is_live_match(match):
+                    continue
+
+                match["_league_id"] = league_id
+                converted = convert_raw_match(match)
+
+                match_id = match.get("id")
+                if match_id:
+                    events, venue = _fetch_match_details(match_id)
+                    converted["events"] = events
+                    if venue:
+                        converted["fixture"]["venue"]["name"] = venue
+
+                all_fixtures.append(converted)
+
+        except requests.exceptions.RequestException as exc:
+            logger.error("Error fetching fixtures for league %s: %s", league_id, exc)
+
+    return all_fixtures
+
+
+def get_league_fixtures(league_id: int) -> list[dict[str, Any]]:
+    """
+    Fetch all fixtures for a league.
+
+    Args:
+        league_id: League ID
+
+    Returns:
+        List of fixture dictionaries in api-football compatible format
+    """
+    fixtures = []
+
+    try:
+        for tab in ["fixtures", "results"]:
+            data = client.get_league_matches(league_id, tab=tab)
+            matches = client.extract_matches(data)
+
+            for match in matches:
+                match["_league_id"] = league_id
+                converted = convert_raw_match(match)
+                fixtures.append(converted)
+
+    except requests.exceptions.RequestException as exc:
+        logger.error("Error fetching fixtures for league %s: %s", league_id, exc)
+
+    return fixtures
+
+
+def get_league_table(league_id: int) -> list[dict[str, Any]]:
     """Return league table for a specific league with caching.
 
     Tables are cached for 30 minutes as they only change after matches finish.
-    This reduces API calls from ~6/hour to ~2/hour during match days.
 
     Args:
-        league_id: League ID (357=Premier, 358=First, 359=FAI Cup)
+        league_id: League ID (126=Premier, 218=First)
 
     Returns:
-        List of team standings dictionaries
+        List of team standings dictionaries in api-football format
     """
     now = time.time()
 
-    # Check if we have a valid cached table
     if league_id in _table_cache:
         cache_entry = _table_cache[league_id]
         if now < cache_entry["expires"]:
@@ -118,21 +171,10 @@ def get_league_table(league_id: int) -> List[Dict[str, Any]]:
             )
             return cache_entry["data"]
 
-    # Cache miss or expired - fetch fresh data
     try:
-        response = requests.get(
-            f"{config.base_url}/standings",
-            headers=config.headers,
-            params={
-                "league": league_id,
-                "season": datetime.now().year,
-            },
-            timeout=5,
-        )
-        response.raise_for_status()
-        table_data = response.json()["response"][0]["league"]["standings"][0]
+        raw_table = client.get_league_table(league_id)
+        table_data = convert_raw_table(raw_table)
 
-        # Update cache
         _table_cache[league_id] = {
             "data": table_data,
             "expires": now + TABLE_CACHE_SECONDS,
@@ -140,10 +182,9 @@ def get_league_table(league_id: int) -> List[Dict[str, Any]]:
         logger.info("Fetched and cached table for league %s", league_id)
         return table_data
 
-    except requests.exceptions.RequestException as e:
-        logger.error("Error getting league table for %s: %s", league_id, e)
+    except requests.exceptions.RequestException as exc:
+        logger.error("Error getting league table for %s: %s", league_id, exc)
 
-        # Return stale cache if available, otherwise empty
         if league_id in _table_cache:
             logger.warning("Using stale cache for league %s", league_id)
             return _table_cache[league_id]["data"]
@@ -151,29 +192,27 @@ def get_league_table(league_id: int) -> List[Dict[str, Any]]:
 
 
 def _format_match_date_section(date_str, matches_list):
-    """Format matches for a single date into a markdown section."""
+    """Format matches for a single date into a markdown section.
+
+    All matches in one table with scorers in a column.
+    """
     date_extracted = datetime.strptime(date_str, "%Y-%m-%d")
     date_header = date_extracted.strftime(
         f"%A, %B {ordinal_suffix(date_extracted.day)}"
     )
-    section_header = f"## {date_header}\n\n"
+    section = f"## {date_header}\n\n"
 
-    matches = [format_live_fixture(match) for match in matches_list]
+    # All matches in one table (scorers are now a column)
+    match_rows = [format_live_fixture(match) for match in matches_list]
     match_table = tabulate(
-        matches, headers=match_table_headers, tablefmt='pipe'
+        match_rows, headers=match_table_headers, tablefmt='pipe'
     )
-
-    section = f"{section_header}{match_table}\n"
-    for match in matches_list:
-        scorers = format_scorers_inline(match)
-        if scorers:
-            section += f"\n{scorers}\n"
-    section += "\n"
+    section += f"{match_table}\n\n"
 
     return section
 
 
-def build_premier_body(matches_data, league_table, gameweek_number):
+def build_premier_body(matches_data, league_table):
     """Build the body text for Premier Division post."""
     matches_by_date = {}
     for match in matches_data:
@@ -202,8 +241,8 @@ def build_premier_body(matches_data, league_table, gameweek_number):
         for item in league_table
     ]
 
-    if gameweek_number - 1 > 0:
-        body += f"## League Table, as of Round {gameweek_number - 1}\n\n"
+    if league_table:
+        body += "## Current League Table\n\n"
         standings_table = tabulate(
             table_data, headers=table_headers, tablefmt='pipe'
         )
@@ -222,7 +261,7 @@ def build_premier_body(matches_data, league_table, gameweek_number):
     return body
 
 
-def build_first_body(matches_data, league_table, gameweek_number):
+def build_first_body(matches_data, league_table):
     """Build the body text for First Division post."""
     matches_by_date = {}
     for match in matches_data:
@@ -251,8 +290,8 @@ def build_first_body(matches_data, league_table, gameweek_number):
         for item in league_table
     ]
 
-    if gameweek_number - 1 > 0:
-        body += f"## League Table, as of Round {gameweek_number - 1}\n\n"
+    if league_table:
+        body += "## Current League Table\n\n"
         standings_table = tabulate(
             table_data, headers=table_headers, tablefmt='pipe'
         )
@@ -286,21 +325,14 @@ def build_cup_body(matches_data, current_round):
     for date, matches_list in sorted(matches_by_date.items()):
         date_extracted = datetime.strptime(date, "%Y-%m-%d")
         date_header = date_extracted.strftime(f"%A, %B {date_extracted.day}")
-        section_header = f"### {date_header}\n\n"
+        body += f"### {date_header}\n\n"
 
-        matches = [format_live_fixture(match) for match in matches_list]
-
+        # All matches in one table (scorers are now a column)
+        match_rows = [format_live_fixture(match) for match in matches_list]
         match_table = tabulate(
-            matches, headers=match_table_headers, tablefmt='pipe'
+            match_rows, headers=match_table_headers, tablefmt='pipe'
         )
-        body += f"{section_header}{match_table}\n"
-
-        # Add scorers inline under table
-        for match in matches_list:
-            scorers = format_scorers_inline(match)
-            if scorers:
-                body += f"\n{scorers}\n"
-        body += "\n"
+        body += f"{match_table}\n\n"
 
     body += (
         "\n\n Welcome to the discussion thread for the Sports Direct "
@@ -349,8 +381,8 @@ def update_reddit_post(post_id: str, new_body: str) -> bool:
 
 def update_league_thread(
         competition_name: str,
-        cache_data: Dict[str, Any],
-        fixtures: List[Dict[str, Any]],
+        cache_data: dict[str, Any],
+        fixtures: list[dict[str, Any]],
         league_id: int,
 ) -> None:
     """Update a league thread with live scores and standings.
@@ -359,23 +391,20 @@ def update_league_thread(
         competition_name: Name of competition ("premier_division", etc.)
         cache_data: Cached data for this competition
         fixtures: List of fixtures for this league
-        league_id: League ID (357, 358, or 359)
+        league_id: League ID
     """
     comp_display = competition_name.replace('_', ' ').title()
     logger.info("Updating %s thread...", comp_display)
 
     post_id = cache_data["post_id"]
-    current_round = cache_data["round"]
     league_table = get_league_table(league_id)
 
-    # Build appropriate body based on competition
     if competition_name == "premier_division":
-        gameweek_number = int(current_round.split()[-1])
-        new_body = build_premier_body(fixtures, league_table, gameweek_number)
+        new_body = build_premier_body(fixtures, league_table)
     elif competition_name == "first_division":
-        gameweek_number = int(current_round.split()[-1])
-        new_body = build_first_body(fixtures, league_table, gameweek_number)
+        new_body = build_first_body(fixtures, league_table)
     else:  # fai_cup
+        current_round = cache_data.get("round", "")
         new_body = build_cup_body(fixtures, current_round)
 
     update_reddit_post(post_id, new_body)
@@ -385,14 +414,12 @@ def main():
     """Main function - fetch live scores and update Reddit posts."""
     today = datetime.now().date()
 
-    # Load cache to see which threads need updating
     cache = load_cache()
 
     if not cache:
         logger.info("No cached posts found, exiting.")
         return
 
-    # Check if today has any matches scheduled
     has_matches_today = False
     for competition in ["premier_division", "first_division", "fai_cup"]:
         if competition in cache:
@@ -404,12 +431,8 @@ def main():
         logger.info("No matches scheduled for %s, exiting.", today.isoformat())
         return
 
-    # Initialize API client with rate limiting
-    api_client = APIClient(config.base_url, config.headers, rate_limiter)
-
-    # Fetch live fixtures for all 3 competitions in one call
     league_ids = [LEAGUE_ID_PREMIER, LEAGUE_ID_FIRST, LEAGUE_ID_FAI_CUP]
-    live_fixtures = get_live_fixtures(league_ids, api_client=api_client)
+    live_fixtures = get_live_fixtures(league_ids)
 
     if not live_fixtures:
         logger.info("No live fixtures found.")
@@ -417,16 +440,9 @@ def main():
 
     logger.info("Found %d live fixtures", len(live_fixtures))
 
-    # Log rate limiting stats
-    stats = rate_limiter.get_stats()
-    logger.info(
-        "Rate limiting stats: %s/%s calls today, polling interval: %ss",
-        stats['daily_calls'],
-        stats['daily_limit'],
-        stats['polling_interval']
-    )
+    next_poll = rate_limiter.get_polling_interval()
+    logger.info("Next poll in %ss", next_poll)
 
-    # Organize fixtures by league
     fixtures_by_league = {
         LEAGUE_ID_PREMIER: [],
         LEAGUE_ID_FIRST: [],
@@ -437,7 +453,6 @@ def main():
         if league_id in fixtures_by_league:
             fixtures_by_league[league_id].append(fixture)
 
-    # Update all competitions using helper function
     competition_map = {
         "premier_division": LEAGUE_ID_PREMIER,
         "first_division": LEAGUE_ID_FIRST,
@@ -453,7 +468,6 @@ def main():
                 league_id
             )
 
-    # Check if all matches are finished
     all_finished = all(
         f["fixture"]["status"]["short"] == "FT" for f in live_fixtures
     )
@@ -461,12 +475,10 @@ def main():
     if all_finished:
         logger.info("All matches finished.")
     else:
-        next_poll = rate_limiter.get_polling_interval()
         logger.info("Some matches still in progress. Next poll in %ss.", next_poll)
 
 
 if __name__ == "__main__":
-    # Configure logging
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',

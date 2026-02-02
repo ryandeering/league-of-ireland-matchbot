@@ -177,4 +177,7 @@ loireddit/*
 
 matchbot_config.py
 
+# Match cache (created at runtime)
+match_cache.json
+
 # End of https://www.toptal.com/developers/gitignore/api/python

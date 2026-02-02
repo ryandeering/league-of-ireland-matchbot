@@ -4,9 +4,11 @@ Used for the League of Ireland subreddit
 """
 
 from datetime import datetime
+from zoneinfo import ZoneInfo
+
 from tabulate import tabulate
 import praw
-import requests
+
 from matchbot_config import MatchbotConfig
 from common import (
     table_headers,
@@ -21,71 +23,46 @@ from common import (
     filter_weekly_matches,
     get_match_date_range,
 )
-
-LEAGUE_ID = 357
-SEASON = datetime.now().year
+from match_client import (
+    MatchDataClient,
+    LEAGUE_ID_PREMIER,
+    convert_raw_match,
+    convert_raw_table,
+)
 
 config = MatchbotConfig()
+client = MatchDataClient()
 
 
-def get_current_gameweek():
-    """Return the current gameweek."""
-    try:
-        response = requests.get(
-            f"{config.base_url}/fixtures/rounds",
-            params={
-                "league": LEAGUE_ID,
-                "current": "true",
-                "season": SEASON,
-            },
-            headers=config.headers,
-            timeout=5,
-        )
-        response.raise_for_status()
-        data = response.json()
-        return data["response"][0]
-    except requests.exceptions.RequestException as request_exception:
-        print(f"Error getting current gameweek: {request_exception}")
-        raise
+def get_matches_for_league():
+    """Fetch all matches for Premier Division.
 
+    Returns:
+        List of match fixtures in api-football compatible format
+    """
+    matches = []
 
-def get_matches_for_gameweek(gameweek):
-    """Return matches for a gameweek."""
-    try:
-        response = requests.get(
-            f"{config.base_url}/fixtures",
-            params={
-                "league": LEAGUE_ID,
-                "season": SEASON,
-                "round": gameweek,
-            },
-            headers=config.headers,
-            timeout=5,
-        )
-        response.raise_for_status()
-        return response.json()["response"]
-    except requests.exceptions.RequestException as request_exception:
-        print(f"Error getting matches for gameweek: {request_exception}")
-        raise
+    fixtures_data = client.get_league_matches(LEAGUE_ID_PREMIER, tab="fixtures")
+    for match in client.extract_matches(fixtures_data):
+        match["_league_id"] = LEAGUE_ID_PREMIER
+        matches.append(convert_raw_match(match))
+
+    results_data = client.get_league_matches(LEAGUE_ID_PREMIER, tab="results")
+    for match in client.extract_matches(results_data):
+        match["_league_id"] = LEAGUE_ID_PREMIER
+        matches.append(convert_raw_match(match))
+
+    return matches
 
 
 def get_league_table():
-    """Return league table."""
-    try:
-        response = requests.get(
-            f"{config.base_url}/standings",
-            headers=config.headers,
-            params={
-                "league": LEAGUE_ID,
-                "season": SEASON,
-            },
-            timeout=5,
-        )
-        response.raise_for_status()
-        return response.json()["response"][0]["league"]["standings"][0]
-    except requests.exceptions.RequestException as request_exception:
-        print(f"Error getting league table: {request_exception}")
-        raise
+    """Fetch league table.
+
+    Returns:
+        List of team standings in api-football compatible format
+    """
+    raw_table = client.get_league_table(LEAGUE_ID_PREMIER)
+    return convert_raw_table(raw_table)
 
 
 def submit_reddit_post(title, body):
@@ -109,7 +86,7 @@ def submit_reddit_post(title, body):
     return post.id
 
 
-def build_post_body(matches_data, league_table, gameweek_number):
+def build_post_body(matches_data, league_table):
     """Build the body text for the Reddit post."""
 
     matches_by_date = {}
@@ -150,8 +127,8 @@ def build_post_body(matches_data, league_table, gameweek_number):
         for item in league_table
     ]
 
-    if gameweek_number - 1 > 0:
-        body += f"## League Table, as of Round {gameweek_number - 1}\n\n"
+    if league_table:
+        body += "## Current League Table\n\n"
         standings_table = tabulate(
             table_data, headers=table_headers, tablefmt='pipe'
         )
@@ -172,36 +149,30 @@ def build_post_body(matches_data, league_table, gameweek_number):
 
 def main():
     """Main function: post weekly thread on Friday."""
-    today = datetime.now()
+    now = datetime.now(ZoneInfo("Europe/Dublin"))
+    today = now.date()
 
-    # Only post on Fridays
-    if today.weekday() != 4:  # 4 = Friday
-        print(f"Not Friday (today is {today.strftime('%A')}), exiting.")
+    if now.weekday() != 4:  # 4 = Friday
+        print(f"Not Friday (today is {now.strftime('%A')}), exiting.")
         return
 
     try:
-        current_gameweek = get_current_gameweek()
-        gameweek_number = int(current_gameweek.split(" ")[-1])
-
-        all_matches = get_matches_for_gameweek(current_gameweek)
-        weekly_matches = filter_weekly_matches(all_matches, today.date())
+        all_matches = get_matches_for_league()
+        weekly_matches = filter_weekly_matches(all_matches, today)
 
         if not weekly_matches:
-            print(
-                f"No matches in next 7 days for round "
-                f"{gameweek_number}, exiting."
-            )
+            print("No matches in next 7 days, exiting.")
             return
 
         first_match_date, last_match_date = get_match_date_range(weekly_matches)
 
         title = (
-            f"LOI Premier Division - Match Thread / "
+            f"LOI Premier Division - Fixtures / "
             f"{first_match_date.strftime('%d-%m-%Y')} to {last_match_date.strftime('%d-%m-%Y')}"
         )
 
         league_table = get_league_table()
-        body = build_post_body(weekly_matches, league_table, gameweek_number)
+        body = build_post_body(weekly_matches, league_table)
 
         post_id = submit_reddit_post(title, body)
 
@@ -215,16 +186,15 @@ def main():
         cache["premier_division"] = {
             "post_id": post_id,
             "match_dates": match_dates,
-            "round": current_gameweek,
-            "posted_at": today.isoformat()
+            "posted_at": now.isoformat()
         }
         save_cache(cache)
 
         print(f"Posted Premier Division thread: {post_id}")
         print(f"Match dates: {match_dates}")
 
-    except requests.exceptions.RequestException as request_exception:
-        print(f"Error running main function: {request_exception}")
+    except Exception as e:
+        print(f"Error running main function: {e}")
         raise
 
 
