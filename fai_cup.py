@@ -172,6 +172,7 @@ def main():
             print(f"No matches found for round: {current_round}")
             return
 
+        round_matches.sort(key=lambda m: m["fixture"]["date"])
         first_match_date = round_matches[0]["fixture"]["date"][:10]
         if first_match_date != today.strftime("%Y-%m-%d"):
             print(f"First match is on {first_match_date}, not today. Exiting.")

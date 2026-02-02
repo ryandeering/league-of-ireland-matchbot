@@ -7,6 +7,7 @@ import logging
 import time
 from datetime import datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from tabulate import tabulate
 import praw
@@ -22,6 +23,7 @@ from common import (
     format_live_fixture,
     load_cache,
     save_cache,
+    parse_match_datetime,
 )
 from match_client import (
     MatchDataClient,
@@ -129,9 +131,9 @@ def get_league_fixtures(league_id: int) -> list[dict[str, Any]]:
         league_id: League ID
 
     Returns:
-        List of fixture dictionaries in api-football compatible format
+        List of fixture dictionaries in api-football compatible format (deduplicated)
     """
-    fixtures = []
+    fixtures_by_id: dict[Any, dict[str, Any]] = {}
 
     try:
         for tab in ["fixtures", "results"]:
@@ -141,12 +143,17 @@ def get_league_fixtures(league_id: int) -> list[dict[str, Any]]:
             for match in matches:
                 match["_league_id"] = league_id
                 converted = convert_raw_match(match)
-                fixtures.append(converted)
+                fixture_id = converted.get("fixture", {}).get("id")
+                if not fixture_id:
+                    logger.warning("Fixture missing ID, skipping dedupe")
+                    fixtures_by_id[id(converted)] = converted
+                elif fixture_id not in fixtures_by_id or tab == "results":
+                    fixtures_by_id[fixture_id] = converted
 
     except requests.exceptions.RequestException as exc:
         logger.error("Error fetching fixtures for league %s: %s", league_id, exc)
 
-    return fixtures
+    return list(fixtures_by_id.values())
 
 
 def get_league_table(league_id: int) -> list[dict[str, Any]]:
@@ -380,10 +387,73 @@ def update_reddit_post(post_id: str, new_body: str) -> bool:
         return False
 
 
+def _get_fixture_dublin_date(fixture: dict[str, Any]) -> str:
+    """Get fixture date in Dublin timezone as ISO string.
+
+    Args:
+        fixture: Fixture dictionary
+
+    Returns:
+        Date string in ISO format (YYYY-MM-DD) in Dublin timezone
+    """
+    date_str = fixture.get("fixture", {}).get("date", "")
+    if not date_str:
+        return ""
+    return parse_match_datetime(date_str).date().isoformat()
+
+
+def _get_weekly_fixtures_with_live_scores(
+        league_id: int,
+        match_dates: list[str],
+        live_fixtures: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Fetch all fixtures for cached match dates and merge in live scores.
+
+    Args:
+        league_id: League ID to fetch
+        match_dates: List of match dates from cache (ISO format, Dublin timezone)
+        live_fixtures: List of currently live fixtures with events
+
+    Returns:
+        List of all fixtures for the week with live data merged in
+    """
+    all_fixtures = get_league_fixtures(league_id)
+
+    weekly_fixtures = [
+        f for f in all_fixtures
+        if _get_fixture_dublin_date(f) in match_dates
+    ]
+
+    live_by_id = {
+        f.get("fixture", {}).get("id"): f for f in live_fixtures
+    }
+
+    merged_live_ids = set()
+
+    merged = []
+    for fixture in weekly_fixtures:
+        fixture_id = fixture.get("fixture", {}).get("id")
+        if fixture_id in live_by_id:
+            merged.append(live_by_id[fixture_id])
+            merged_live_ids.add(fixture_id)
+        else:
+            merged.append(fixture)
+
+    for live_id, live_fixture in live_by_id.items():
+        if live_id not in merged_live_ids:
+            logger.warning(
+                "Live fixture %s not in cached match_dates, including anyway",
+                live_id
+            )
+            merged.append(live_fixture)
+
+    return merged
+
+
 def update_league_thread(
         competition_name: str,
         cache_data: dict[str, Any],
-        fixtures: list[dict[str, Any]],
+        live_fixtures: list[dict[str, Any]],
         league_id: int,
 ) -> None:
     """Update a league thread with live scores and standings.
@@ -391,14 +461,19 @@ def update_league_thread(
     Args:
         competition_name: Name of competition ("premier_division", etc.)
         cache_data: Cached data for this competition
-        fixtures: List of fixtures for this league
+        live_fixtures: List of currently live fixtures for this league
         league_id: League ID
     """
     comp_display = competition_name.replace('_', ' ').title()
     logger.info("Updating %s thread...", comp_display)
 
     post_id = cache_data["post_id"]
+    match_dates = cache_data.get("match_dates", [])
     league_table = get_league_table(league_id)
+
+    fixtures = _get_weekly_fixtures_with_live_scores(
+        league_id, match_dates, live_fixtures
+    )
 
     if competition_name == "premier_division":
         new_body = build_premier_body(fixtures, league_table)
@@ -415,7 +490,7 @@ def _get_todays_fixtures(today, league_ids):
     """Fetch all fixtures for today (started or not).
 
     Args:
-        today: Today's date
+        today: Today's date (Dublin timezone)
         league_ids: List of league IDs to check
 
     Returns:
@@ -427,8 +502,8 @@ def _get_todays_fixtures(today, league_ids):
     for league_id in league_ids:
         fixtures = get_league_fixtures(league_id)
         for fixture in fixtures:
-            fixture_date = fixture.get("fixture", {}).get("date", "")[:10]
-            if fixture_date == today_str:
+            fixture_dublin_date = _get_fixture_dublin_date(fixture)
+            if fixture_dublin_date == today_str:
                 todays_fixtures.append(fixture)
 
     return todays_fixtures
@@ -457,8 +532,9 @@ def _cleanup_finished_match_day(cache, today):
         logger.info("Today's matches haven't started yet.")
         return
 
+    finished_statuses = {"FT", "AET", "PEN", "CANC", "ABD", "PST", "AWD", "WO"}
     all_finished = all(
-        f.get("fixture", {}).get("status", {}).get("short") == "FT"
+        f.get("fixture", {}).get("status", {}).get("short") in finished_statuses
         for f in started_fixtures
     )
 
@@ -481,7 +557,7 @@ def _cleanup_finished_match_day(cache, today):
 
 def main():
     """Main function - fetch live scores and update Reddit posts."""
-    today = datetime.now().date()
+    today = datetime.now(ZoneInfo("Europe/Dublin")).date()
 
     cache = load_cache()
 
