@@ -28,6 +28,7 @@ from match_client import (
     LEAGUE_ID_PREMIER,
     convert_raw_match,
     convert_raw_table,
+    enrich_fixtures_with_venues,
 )
 
 config = MatchbotConfig()
@@ -38,21 +39,21 @@ def get_matches_for_league():
     """Fetch all matches for Premier Division.
 
     Returns:
-        List of match fixtures in api-football compatible format
+        List of match fixtures in api-football compatible format (deduplicated)
     """
-    matches = []
+    fixtures_by_id = {}
 
-    fixtures_data = client.get_league_matches(LEAGUE_ID_PREMIER, tab="fixtures")
-    for match in client.extract_matches(fixtures_data):
-        match["_league_id"] = LEAGUE_ID_PREMIER
-        matches.append(convert_raw_match(match))
+    for tab in ["fixtures", "results"]:
+        data = client.get_league_matches(LEAGUE_ID_PREMIER, tab=tab)
+        for match in client.extract_matches(data):
+            match["_league_id"] = LEAGUE_ID_PREMIER
+            converted = convert_raw_match(match)
+            fixture_id = converted["fixture"]["id"]
+            # Results tab has more accurate data for finished matches
+            if fixture_id not in fixtures_by_id or tab == "results":
+                fixtures_by_id[fixture_id] = converted
 
-    results_data = client.get_league_matches(LEAGUE_ID_PREMIER, tab="results")
-    for match in client.extract_matches(results_data):
-        match["_league_id"] = LEAGUE_ID_PREMIER
-        matches.append(convert_raw_match(match))
-
-    return matches
+    return enrich_fixtures_with_venues(client, list(fixtures_by_id.values()))
 
 
 def get_league_table():

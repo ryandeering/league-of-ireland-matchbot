@@ -9,11 +9,7 @@ from zoneinfo import ZoneInfo
 from typing import Dict, List, Tuple, Any
 
 normalised_team_names = {
-    "St Patrick's Athl.": "St Patrick's Athletic",
-    "Dundalk": "Dundalk FC",
-    "Kerry": "Kerry FC",
-    "Waterford": "Waterford FC",
-    "Wexford": "Wexford FC",
+    "St Patrick's Athl.": "St. Patrick's Athletic",
 }
 
 match_table_headers = ["Home Team", "Score", "Away Team", "Ground", "Status", "Kickoff", "Scorers"]
@@ -44,9 +40,13 @@ def normalise_team_name(team_name: str) -> str:
         team_name: Team name from API
 
     Returns:
-        Normalized team name or original if no mapping exists
+        Normalized team name with FC suffix removed
     """
-    return normalised_team_names.get(team_name, team_name)
+    name = normalised_team_names.get(team_name, team_name)
+    # Remove FC suffix from all team names
+    if name.endswith(" FC"):
+        name = name[:-3]
+    return name
 
 
 def ordinal_suffix(day: int) -> str:

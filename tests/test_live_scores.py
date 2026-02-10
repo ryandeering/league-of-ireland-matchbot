@@ -179,7 +179,7 @@ class TestFormatLiveFixture(unittest.TestCase):
     def test_format_contains_team_names(self):
         """Test that team names are included."""
         formatted = format_live_fixture(self.fixture)
-        self.assertEqual(formatted[0], "St Patrick's Athletic")
+        self.assertEqual(formatted[0], "St. Patrick's Athletic")
         self.assertEqual(formatted[2], "Shelbourne")
 
     def test_format_contains_score(self):
@@ -201,7 +201,7 @@ class TestFormatLiveFixture(unittest.TestCase):
         """Test that team name normalization works."""
         self.fixture["teams"]["home"]["name"] = "St Patrick's Athl."
         formatted = format_live_fixture(self.fixture)
-        self.assertEqual(formatted[0], "St Patrick's Athletic")
+        self.assertEqual(formatted[0], "St. Patrick's Athletic")
 
 
 class TestMatchStatusEdgeCases(unittest.TestCase):

@@ -369,6 +369,29 @@ def extract_venue_from_details(match_details: dict[str, Any]) -> str:
     return stadium.get("name", "")
 
 
+def enrich_fixtures_with_venues(
+    client: MatchDataClient,
+    fixtures: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Fetch venue data for each fixture from match details endpoint.
+
+    Args:
+        client: MatchDataClient instance
+        fixtures: List of fixtures in api-football format
+
+    Returns:
+        Same fixtures with venue names populated
+    """
+    for fixture in fixtures:
+        match_id = fixture.get("fixture", {}).get("id")
+        if match_id:
+            details = client.get_match_details(match_id)
+            venue = extract_venue_from_details(details)
+            if venue:
+                fixture["fixture"]["venue"]["name"] = venue
+    return fixtures
+
+
 def convert_match_events(match_details: dict[str, Any]) -> list[dict[str, Any]]:
     """Extract and convert events from match details.
 
