@@ -674,7 +674,13 @@ def main():
         )
         for comp_name, league_id in competitions_today.items():
             update_league_thread(comp_name, cache[comp_name], [], league_id)
-        _cleanup_finished_match_day(cache, today, competitions_today)
+
+        cache_for_cleanup = load_cache()
+        for comp_name in competitions_today:
+            if comp_name not in cache_for_cleanup and comp_name in cache:
+                cache_for_cleanup[comp_name] = cache[comp_name]
+
+        _cleanup_finished_match_day(cache_for_cleanup, today, competitions_today)
         return
 
     logger.info("Found %d live fixtures", len(live_fixtures))

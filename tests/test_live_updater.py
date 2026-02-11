@@ -671,6 +671,49 @@ class TestLiveUpdaterErrorHandling(unittest.TestCase):
         self.assertEqual(cleanup_args[1].isoformat(), today)
         self.assertEqual(cleanup_args[2], {"premier_division": 126})
 
+    @patch("live_updater._cleanup_finished_match_day")
+    @patch("live_updater.update_league_thread")
+    @patch("live_updater.load_cache")
+    @patch("live_updater.get_live_fixtures")
+    def test_no_live_path_reloads_cache_before_cleanup(
+        self,
+        mock_get_fixtures,
+        mock_load_cache,
+        mock_update_league_thread,
+        mock_cleanup,
+    ):
+        """No-live path should cleanup using fresh cache state."""
+        today = date.today().isoformat()
+        initial_cache = {
+            "premier_division": {
+                "post_id": "test123",
+                "match_dates": [today],
+                "round": "Regular Season - 32",
+            }
+        }
+        refreshed_cache = {
+            "premier_division": {
+                "post_id": "test123",
+                "match_dates": [today],
+                "round": "Regular Season - 32",
+            },
+            "_body_hashes": {"test123": "abc123"},
+        }
+        mock_load_cache.side_effect = [initial_cache, refreshed_cache]
+        mock_get_fixtures.return_value = []
+
+        from live_updater import main
+
+        main()
+
+        self.assertEqual(mock_load_cache.call_count, 2)
+        self.assertEqual(mock_update_league_thread.call_count, 1)
+        cleanup_args = mock_cleanup.call_args.args
+        self.assertIs(cleanup_args[0], refreshed_cache)
+        self.assertIn("_body_hashes", cleanup_args[0])
+        self.assertEqual(cleanup_args[1].isoformat(), today)
+        self.assertEqual(cleanup_args[2], {"premier_division": 126})
+
     @patch("live_updater.update_league_thread")
     @patch("live_updater.load_cache")
     @patch("live_updater.get_live_fixtures")
