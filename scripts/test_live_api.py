@@ -93,7 +93,7 @@ def main():
     print("\n--- LOI Premier Division Table ---")
     try:
         table = client.get_league_table(LEAGUE_ID_PREMIER)
-        converted_table = convert_raw_table(table)
+        converted_table = convert_raw_table(table or [])
         print(f"Found {len(converted_table)} teams")
 
         if converted_table:

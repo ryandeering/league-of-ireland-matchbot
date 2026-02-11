@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 
 from tabulate import tabulate
 import praw
+import prawcore
 import requests
 
 from matchbot_config import MatchbotConfig
@@ -23,7 +24,7 @@ from common import (
     format_live_fixture,
     load_cache,
     save_cache,
-    parse_match_datetime,
+    get_fixture_dublin_date,
 )
 from match_client import (
     MatchDataClient,
@@ -34,6 +35,7 @@ from match_client import (
     convert_raw_table,
     convert_match_events,
     extract_venue_from_details,
+    extract_score_from_details,
 )
 from rate_limiter import RateLimiter
 
@@ -47,28 +49,37 @@ rate_limiter = RateLimiter()
 # Global cache for league tables
 _table_cache: dict[int, dict[str, Any]] = {}
 
+# Per-run cache for matchDetails scores (fixture_id -> (home, away))
+_score_cache: dict[int, tuple[int, int]] = {}
+
+# Per-run cache of last posted body per post_id (avoids redundant Reddit edits)
+_last_body: dict[str, str] = {}
+
 # Match data client instance
 client = MatchDataClient()
 
 
-def _fetch_match_details(match_id: str) -> tuple[list[dict[str, Any]], str]:
-    """Fetch events and venue for a specific match.
+def _fetch_match_details(
+    match_id: str,
+) -> tuple[list[dict[str, Any]], str, tuple[Any, Any]]:
+    """Fetch events, venue, and scores for a specific match.
 
     Args:
         match_id: Match ID to fetch details for
 
     Returns:
-        Tuple of (events list, venue name)
+        Tuple of (events list, venue name, (home_score, away_score))
     """
     try:
         details = client.get_match_details(int(match_id))
         if details:
             events = convert_match_events(details)
             venue = extract_venue_from_details(details)
-            return events, venue
+            scores = extract_score_from_details(details)
+            return events, venue, scores
     except (ValueError, TypeError) as exc:
         logger.warning("Could not fetch match details: %s", exc)
-    return [], ""
+    return [], "", (None, None)
 
 
 def _is_live_match(match: dict[str, Any]) -> bool:
@@ -110,10 +121,18 @@ def get_live_fixtures(league_ids: list[int]) -> list[dict[str, Any]]:
 
                 match_id = match.get("id")
                 if match_id:
-                    events, venue = _fetch_match_details(match_id)
+                    events, venue, scores = _fetch_match_details(match_id)
                     converted["events"] = events
                     if venue:
                         converted["fixture"]["venue"]["name"] = venue
+                    home_score, away_score = scores
+                    if converted["goals"]["home"] is None and home_score is not None:
+                        converted["goals"]["home"] = home_score
+                        converted["goals"]["away"] = away_score
+                    if home_score is not None:
+                        _score_cache[converted["fixture"]["id"]] = (
+                            home_score, away_score
+                        )
 
                 all_fixtures.append(converted)
 
@@ -179,24 +198,22 @@ def get_league_table(league_id: int) -> list[dict[str, Any]]:
             )
             return cache_entry["data"]
 
-    try:
-        raw_table = client.get_league_table(league_id)
-        table_data = convert_raw_table(raw_table)
-
-        _table_cache[league_id] = {
-            "data": table_data,
-            "expires": now + TABLE_CACHE_SECONDS,
-        }
-        logger.info("Fetched and cached table for league %s", league_id)
-        return table_data
-
-    except requests.exceptions.RequestException as exc:
-        logger.error("Error getting league table for %s: %s", league_id, exc)
-
+    raw_table = client.get_league_table(league_id)
+    if raw_table is None:
+        logger.error("Error getting league table for %s", league_id)
         if league_id in _table_cache:
             logger.warning("Using stale cache for league %s", league_id)
             return _table_cache[league_id]["data"]
         return []
+
+    table_data = convert_raw_table(raw_table)
+
+    _table_cache[league_id] = {
+        "data": table_data,
+        "expires": now + TABLE_CACHE_SECONDS,
+    }
+    logger.info("Fetched and cached table for league %s", league_id)
+    return table_data
 
 
 def _format_match_date_section(date_str, matches_list):
@@ -224,7 +241,7 @@ def build_premier_body(matches_data, league_table):
     """Build the body text for Premier Division post."""
     matches_by_date = {}
     for match in matches_data:
-        date = match["fixture"]["date"][:10]
+        date = get_fixture_dublin_date(match)
         matches_by_date.setdefault(date, []).append(match)
 
     body = "*Live scores will be updated during matches*\n\n"
@@ -273,7 +290,7 @@ def build_first_body(matches_data, league_table):
     """Build the body text for First Division post."""
     matches_by_date = {}
     for match in matches_data:
-        date = match["fixture"]["date"][:10]
+        date = get_fixture_dublin_date(match)
         matches_by_date.setdefault(date, []).append(match)
 
     body = "*Live scores will be updated during matches*\n\n"
@@ -322,7 +339,7 @@ def build_cup_body(matches_data, current_round):
     """Build the body text for FAI Cup post."""
     matches_by_date = {}
     for match in matches_data:
-        date = match["fixture"]["date"][:10]
+        date = get_fixture_dublin_date(match)
         matches_by_date.setdefault(date, []).append(match)
 
     body = (
@@ -366,6 +383,10 @@ def update_reddit_post(post_id: str, new_body: str) -> bool:
     Returns:
         True if successful, False otherwise
     """
+    if _last_body.get(post_id) == new_body:
+        logger.debug("Body unchanged for post %s, skipping edit", post_id)
+        return True
+
     try:
         reddit = praw.Reddit(
             client_id=config.client_id,
@@ -377,29 +398,50 @@ def update_reddit_post(post_id: str, new_body: str) -> bool:
 
         post = reddit.submission(id=post_id)
         post.edit(new_body)
+        _last_body[post_id] = new_body
         logger.info("Updated post %s", post_id)
         return True
     except (
             praw.exceptions.PRAWException,
-            requests.exceptions.RequestException
+            prawcore.exceptions.PrawcoreException,
+            requests.exceptions.RequestException,
     ) as e:
         logger.error("Error updating post %s: %s", post_id, e)
         return False
 
 
-def _get_fixture_dublin_date(fixture: dict[str, Any]) -> str:
-    """Get fixture date in Dublin timezone as ISO string.
+def _enrich_fixture_scores(fixture: dict[str, Any]) -> None:
+    """Fill in missing scores from matchDetails for started/finished fixtures.
 
-    Args:
-        fixture: Fixture dictionary
-
-    Returns:
-        Date string in ISO format (YYYY-MM-DD) in Dublin timezone
+    Uses the per-run _score_cache to avoid redundant API calls.
     """
-    date_str = fixture.get("fixture", {}).get("date", "")
-    if not date_str:
-        return ""
-    return parse_match_datetime(date_str).date().isoformat()
+    goals = fixture.get("goals", {})
+    if goals.get("home") is not None:
+        return  # Already has scores
+
+    status_short = fixture.get("fixture", {}).get("status", {}).get("short", "NS")
+    if status_short in ("TBD", "NS"):
+        return  # Pre-match, no scores expected
+
+    fixture_id = fixture.get("fixture", {}).get("id")
+    if not fixture_id:
+        return
+
+    # Check per-run cache first
+    if fixture_id in _score_cache:
+        home, away = _score_cache[fixture_id]
+        fixture["goals"]["home"] = home
+        fixture["goals"]["away"] = away
+        return
+
+    # Fetch from matchDetails
+    details = client.get_match_details(fixture_id)
+    if details:
+        home_score, away_score = extract_score_from_details(details)
+        if home_score is not None:
+            fixture["goals"]["home"] = home_score
+            fixture["goals"]["away"] = away_score
+            _score_cache[fixture_id] = (home_score, away_score)
 
 
 def _get_weekly_fixtures_with_live_scores(
@@ -421,7 +463,7 @@ def _get_weekly_fixtures_with_live_scores(
 
     weekly_fixtures = [
         f for f in all_fixtures
-        if _get_fixture_dublin_date(f) in match_dates
+        if get_fixture_dublin_date(f) in match_dates
     ]
 
     live_by_id = {
@@ -446,6 +488,10 @@ def _get_weekly_fixtures_with_live_scores(
                 live_id
             )
             merged.append(live_fixture)
+
+    # Enrich fixtures that have null scores from matchDetails
+    for fixture in merged:
+        _enrich_fixture_scores(fixture)
 
     return merged
 
@@ -502,7 +548,7 @@ def _get_todays_fixtures(today, league_ids):
     for league_id in league_ids:
         fixtures = get_league_fixtures(league_id)
         for fixture in fixtures:
-            fixture_dublin_date = _get_fixture_dublin_date(fixture)
+            fixture_dublin_date = get_fixture_dublin_date(fixture)
             if fixture_dublin_date == today_str:
                 todays_fixtures.append(fixture)
 
@@ -523,19 +569,10 @@ def _cleanup_finished_match_day(cache, today):
         logger.info("No fixtures found for today.")
         return
 
-    started_fixtures = [
-        f for f in todays_fixtures
-        if f.get("fixture", {}).get("status", {}).get("short") not in ["TBD", "NS"]
-    ]
-
-    if not started_fixtures:
-        logger.info("Today's matches haven't started yet.")
-        return
-
     finished_statuses = {"FT", "AET", "PEN", "CANC", "ABD", "PST", "AWD", "WO"}
     all_finished = all(
         f.get("fixture", {}).get("status", {}).get("short") in finished_statuses
-        for f in started_fixtures
+        for f in todays_fixtures
     )
 
     if all_finished:
@@ -557,6 +594,8 @@ def _cleanup_finished_match_day(cache, today):
 
 def main():
     """Main function - fetch live scores and update Reddit posts."""
+    _score_cache.clear()
+    _last_body.clear()
     today = datetime.now(ZoneInfo("Europe/Dublin")).date()
 
     cache = load_cache()
@@ -565,22 +604,31 @@ def main():
         logger.info("No cached posts found, exiting.")
         return
 
-    has_matches_today = False
-    for competition in ["premier_division", "first_division", "fai_cup"]:
-        if competition in cache:
-            if today.isoformat() in cache[competition].get("match_dates", []):
-                has_matches_today = True
-                break
+    competition_map = {
+        "premier_division": LEAGUE_ID_PREMIER,
+        "first_division": LEAGUE_ID_FIRST,
+        "fai_cup": LEAGUE_ID_FAI_CUP,
+    }
 
-    if not has_matches_today:
+    competitions_today = {
+        comp_name: league_id
+        for comp_name, league_id in competition_map.items()
+        if today.isoformat() in cache.get(comp_name, {}).get("match_dates", [])
+    }
+
+    if not competitions_today:
         logger.info("No matches scheduled for %s, exiting.", today.isoformat())
         return
 
-    league_ids = [LEAGUE_ID_PREMIER, LEAGUE_ID_FIRST, LEAGUE_ID_FAI_CUP]
+    league_ids = list(competitions_today.values())
     live_fixtures = get_live_fixtures(league_ids)
 
     if not live_fixtures:
-        logger.info("No live fixtures found, checking if today's matches finished.")
+        logger.info(
+            "No live fixtures found, performing final update before cleanup."
+        )
+        for comp_name, league_id in competitions_today.items():
+            update_league_thread(comp_name, cache[comp_name], [], league_id)
         _cleanup_finished_match_day(cache, today)
         return
 
@@ -589,30 +637,19 @@ def main():
     next_poll = rate_limiter.get_polling_interval()
     logger.info("Next poll in %ss", next_poll)
 
-    fixtures_by_league = {
-        LEAGUE_ID_PREMIER: [],
-        LEAGUE_ID_FIRST: [],
-        LEAGUE_ID_FAI_CUP: []
-    }
+    fixtures_by_league = {league_id: [] for league_id in league_ids}
     for fixture in live_fixtures:
         league_id = fixture["league"]["id"]
         if league_id in fixtures_by_league:
             fixtures_by_league[league_id].append(fixture)
 
-    competition_map = {
-        "premier_division": LEAGUE_ID_PREMIER,
-        "first_division": LEAGUE_ID_FIRST,
-        "fai_cup": LEAGUE_ID_FAI_CUP,
-    }
-
-    for comp_name, league_id in competition_map.items():
-        if comp_name in cache and fixtures_by_league[league_id]:
-            update_league_thread(
-                comp_name,
-                cache[comp_name],
-                fixtures_by_league[league_id],
-                league_id
-            )
+    for comp_name, league_id in competitions_today.items():
+        update_league_thread(
+            comp_name,
+            cache[comp_name],
+            fixtures_by_league[league_id],
+            league_id
+        )
 
     logger.info("Updated threads. Next poll in %ss.", next_poll)
 

@@ -3,11 +3,14 @@
 import unittest
 from unittest.mock import Mock, patch
 
+import requests
+
 from match_client import (
     MatchDataClient,
     convert_raw_match,
     convert_raw_table,
     convert_match_events,
+    extract_score_from_details,
     LEAGUE_ID_PREMIER,
 )
 from common import format_live_fixture, get_match_status_display
@@ -339,6 +342,222 @@ class TestMatchDataClientIntegration(unittest.TestCase):
 
         self.assertIn("header", details)
         mock_get.assert_called_once()
+
+    @patch("match_client.requests.get")
+    def test_get_league_table_returns_none_on_request_error(self, mock_get):
+        """Test table endpoint errors return None for caller-level fallback logic."""
+        mock_get.side_effect = requests.exceptions.RequestException("API down")
+
+        match_client = MatchDataClient()
+        table = match_client.get_league_table(126)
+
+        self.assertIsNone(table)
+
+
+class TestExtractScoreFromDetails(unittest.TestCase):
+    """Test score extraction from matchDetails header."""
+
+    def test_extract_scores_from_header(self):
+        """Test extracting home/away scores from header teams."""
+        details = {
+            "header": {
+                "teams": [
+                    {"name": "Derry City", "score": 2},
+                    {"name": "Sligo Rovers", "score": 1},
+                ]
+            }
+        }
+        home, away = extract_score_from_details(details)
+        self.assertEqual(home, 2)
+        self.assertEqual(away, 1)
+
+    def test_extract_scores_zero_zero(self):
+        """Test extracting 0-0 scores (not confused with None)."""
+        details = {
+            "header": {
+                "teams": [
+                    {"name": "Team A", "score": 0},
+                    {"name": "Team B", "score": 0},
+                ]
+            }
+        }
+        home, away = extract_score_from_details(details)
+        self.assertEqual(home, 0)
+        self.assertEqual(away, 0)
+
+    def test_extract_scores_missing_score_key(self):
+        """Test returns None when header has no score."""
+        details = {
+            "header": {
+                "teams": [
+                    {"name": "Team A"},
+                    {"name": "Team B"},
+                ]
+            }
+        }
+        home, away = extract_score_from_details(details)
+        self.assertIsNone(home)
+        self.assertIsNone(away)
+
+    def test_extract_scores_empty_header(self):
+        """Test returns None with empty header."""
+        details = {"header": {}}
+        home, away = extract_score_from_details(details)
+        self.assertIsNone(home)
+        self.assertIsNone(away)
+
+    def test_extract_scores_no_header(self):
+        """Test returns None with missing header."""
+        details = {}
+        home, away = extract_score_from_details(details)
+        self.assertIsNone(home)
+        self.assertIsNone(away)
+
+    def test_extract_scores_single_team(self):
+        """Test returns None with only one team in header."""
+        details = {
+            "header": {
+                "teams": [{"name": "Team A", "score": 2}]
+            }
+        }
+        home, away = extract_score_from_details(details)
+        self.assertIsNone(home)
+        self.assertIsNone(away)
+
+    def test_null_league_score_enriched_from_details(self):
+        """Regression: league payload null score + matchDetails score = correct render."""
+        # Simulate: leagues endpoint returns null scores
+        raw_match = {
+            "id": "5100791",
+            "home": {"id": "8338", "name": "Derry City"},
+            "away": {"id": "6361", "name": "Sligo Rovers"},
+            "status": {
+                "utcTime": "2026-02-06T19:45:00Z",
+                "started": True,
+                "finished": True,
+                "cancelled": False,
+                "score": {"home": None, "away": None},
+            },
+            "_league_id": 126,
+        }
+        converted = convert_raw_match(raw_match)
+
+        # Scores should be None from leagues endpoint
+        self.assertIsNone(converted["goals"]["home"])
+        self.assertIsNone(converted["goals"]["away"])
+
+        # matchDetails has the real scores
+        details = {
+            "header": {
+                "teams": [
+                    {"name": "Derry City", "score": 2},
+                    {"name": "Sligo Rovers", "score": 1},
+                ]
+            }
+        }
+        home, away = extract_score_from_details(details)
+        self.assertEqual(home, 2)
+        self.assertEqual(away, 1)
+
+        # After enrichment, scores should be correct
+        converted["goals"]["home"] = home
+        converted["goals"]["away"] = away
+        from common import get_match_status_display
+        score, status = get_match_status_display(converted)
+        self.assertEqual(score, "2-1")
+        self.assertEqual(status, "FT")
+
+
+class TestScorerAttribution(unittest.TestCase):
+    """Test goal scorer attribution with isHome flag vs name comparison."""
+
+    def test_scorer_attributed_by_ishome_flag(self):
+        """Test scorers are attributed using isHome flag, not team name.
+
+        Regression: matchDetails can use different team name variants
+        (e.g. "St Patrick's Athl." vs "St. Patrick's Athletic"). The isHome
+        flag avoids this mismatch entirely.
+        """
+        fixture = {
+            "teams": {
+                "home": {"name": "St Patrick's Athl."},
+                "away": {"name": "Shelbourne"},
+            },
+            "events": [
+                {
+                    "type": "Goal",
+                    "team": {"name": "St. Patrick's Athletic"},  # Different variant!
+                    "player": {"name": "Chris Forrester"},
+                    "time": {"elapsed": 34},
+                    "detail": "Normal Goal",
+                    "isHome": True,
+                },
+                {
+                    "type": "Goal",
+                    "team": {"name": "Shelbourne FC"},  # Different variant!
+                    "player": {"name": "Sean Boyd"},
+                    "time": {"elapsed": 67},
+                    "detail": "Normal Goal",
+                    "isHome": False,
+                },
+            ],
+        }
+
+        scorers = format_live_fixture(fixture)
+        # Scorers column should have both goals attributed correctly
+        scorers_str = scorers[6]
+        self.assertIn("Forrester", scorers_str)
+        self.assertIn("Boyd", scorers_str)
+
+    def test_scorer_fallback_to_team_name_when_no_ishome(self):
+        """Test scorers fall back to team name comparison when isHome is absent."""
+        fixture = {
+            "teams": {
+                "home": {"name": "Derry City"},
+                "away": {"name": "Sligo Rovers"},
+            },
+            "events": [
+                {
+                    "type": "Goal",
+                    "team": {"name": "Derry City"},
+                    "player": {"name": "Will Patching"},
+                    "time": {"elapsed": 12},
+                    "detail": "Normal Goal",
+                    # No isHome key
+                },
+            ],
+        }
+
+        from common import extract_scorers
+        scorers = extract_scorers(fixture)
+        self.assertEqual(len(scorers["home"]), 1)
+        self.assertEqual(scorers["home"][0]["name"], "Will Patching")
+        self.assertEqual(len(scorers["away"]), 0)
+
+    def test_scorer_name_mismatch_without_ishome_goes_to_away(self):
+        """Test that name mismatch without isHome puts scorer in away bucket."""
+        fixture = {
+            "teams": {
+                "home": {"name": "St Patrick's Athl."},
+                "away": {"name": "Shelbourne"},
+            },
+            "events": [
+                {
+                    "type": "Goal",
+                    "team": {"name": "St. Patrick's Athletic"},  # No match!
+                    "player": {"name": "Chris Forrester"},
+                    "time": {"elapsed": 34},
+                    "detail": "Normal Goal",
+                    # No isHome key - name won't match home team
+                },
+            ],
+        }
+
+        from common import extract_scorers
+        scorers = extract_scorers(fixture)
+        # Without isHome, the name mismatch causes it to go to away
+        self.assertEqual(len(scorers["home"]), 0)
+        self.assertEqual(len(scorers["away"]), 1)
 
 
 if __name__ == "__main__":

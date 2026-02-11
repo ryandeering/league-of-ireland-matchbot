@@ -16,6 +16,7 @@ from common import (
     match_table_headers,
     load_cache,
     save_cache,
+    get_fixture_dublin_date,
 )
 from match_client import (
     MatchDataClient,
@@ -25,6 +26,14 @@ from match_client import (
 
 config = MatchbotConfig()
 client = MatchDataClient()
+
+ROUND_DISPLAY_NAMES = {
+    "1/16": "Round of 32",
+    "1/8": "Round of 16",
+    "1/4": "Quarter-finals",
+    "1/2": "Semi-finals",
+    "final": "Final",
+}
 
 
 def get_current_round(matches):
@@ -46,15 +55,22 @@ def get_current_round(matches):
             if round_info:
                 # Extract just the round name (e.g., "Quarter-finals")
                 if " - " in round_info:
-                    return round_info.split(" - ")[-1]
-                return round_info
+                    extracted = round_info.split(" - ")[-1]
+                    if extracted:
+                        return extracted
+                else:
+                    return round_info
 
-    # Fallback: use the last match's round
+    # Fallback: use the last match's round (by date)
     if matches:
-        round_info = matches[-1].get("league", {}).get("round", "FAI Cup")
+        latest_match = sorted(matches, key=lambda m: m["fixture"]["date"])[-1]
+        round_info = latest_match.get("league", {}).get("round", "FAI Cup")
         if " - " in round_info:
-            return round_info.split(" - ")[-1]
-        return round_info
+            extracted = round_info.split(" - ")[-1]
+            if extracted:
+                return extracted
+        elif round_info:
+            return round_info
 
     return "FAI Cup"
 
@@ -65,34 +81,75 @@ def get_matches_for_cup():
     Returns:
         List of match fixtures in api-football compatible format
     """
-    matches = []
+    fixtures_by_id = {}
 
-    fixtures_data = client.get_league_matches(LEAGUE_ID_FAI_CUP, tab="fixtures")
-    for match in client.extract_matches(fixtures_data):
-        match["_league_id"] = LEAGUE_ID_FAI_CUP
-        matches.append(convert_raw_match(match))
+    for tab in ["fixtures", "results"]:
+        data = client.get_league_matches(LEAGUE_ID_FAI_CUP, tab=tab)
+        for match in client.extract_matches(data):
+            match["_league_id"] = LEAGUE_ID_FAI_CUP
+            converted = convert_raw_match(match)
+            fixture_id = converted["fixture"]["id"]
+            # Results tab has more accurate data for finished matches
+            if fixture_id not in fixtures_by_id or tab == "results":
+                fixtures_by_id[fixture_id] = converted
 
-    results_data = client.get_league_matches(LEAGUE_ID_FAI_CUP, tab="results")
-    for match in client.extract_matches(results_data):
-        match["_league_id"] = LEAGUE_ID_FAI_CUP
-        matches.append(convert_raw_match(match))
+    return list(fixtures_by_id.values())
 
-    return matches
+
+def _extract_round_name(round_str: str) -> str:
+    """Extract the round name from a full round string.
+
+    Args:
+        round_str: Full round string (e.g., "Regular Season - Quarter-finals")
+
+    Returns:
+        Extracted round name (e.g., "Quarter-finals"), or original string
+    """
+    if " - " in round_str:
+        return round_str.split(" - ")[-1]
+    return round_str
+
+
+def _normalise_round_key(round_str: str) -> str:
+    """Normalise round key for case-insensitive exact comparisons."""
+    return _extract_round_name(round_str).strip().lower()
+
+
+def get_round_display_name(round_key: str) -> str:
+    """Return human-friendly round label for post title/body.
+
+    Args:
+        round_key: Raw round key from API or extracted round name
+
+    Returns:
+        Display-friendly round name (e.g., "Quarter-finals")
+    """
+    if not round_key:
+        return "FAI Cup"
+    normalised = _normalise_round_key(round_key)
+    return ROUND_DISPLAY_NAMES.get(normalised, _extract_round_name(round_key))
 
 
 def get_matches_for_round(matches, current_round):
     """Filter matches to only include current round.
+
+    Uses exact matching on the extracted round name to avoid
+    substring collisions (e.g., round "1" matching "10" or "11").
 
     Args:
         matches: All cup matches
         current_round: Current round name
 
     Returns:
-        List of matches in the current round
+        List of matches in the current round (empty if current_round is blank)
     """
+    if not current_round:
+        return []
+    current_round_key = _normalise_round_key(current_round)
     return [
         m for m in matches
-        if current_round in m.get("league", {}).get("round", "")
+        if _normalise_round_key(m.get("league", {}).get("round", ""))
+        == current_round_key
     ]
 
 
@@ -124,7 +181,7 @@ def build_post_body(matches_data, current_round):
     """
     matches_by_date = {}
     for match in matches_data:
-        date = match["fixture"]["date"][:10]
+        date = get_fixture_dublin_date(match)
         matches_by_date.setdefault(date, []).append(match)
 
     body = (
@@ -164,26 +221,27 @@ def main():
 
     try:
         all_matches = get_matches_for_cup()
-        current_round = get_current_round(all_matches)
+        current_round_key = get_current_round(all_matches)
 
-        round_matches = get_matches_for_round(all_matches, current_round)
+        round_matches = get_matches_for_round(all_matches, current_round_key)
+        current_round_display = get_round_display_name(current_round_key)
 
         if not round_matches:
-            print(f"No matches found for round: {current_round}")
+            print(f"No matches found for round: {current_round_display}")
             return
 
         round_matches.sort(key=lambda m: m["fixture"]["date"])
-        first_match_date = round_matches[0]["fixture"]["date"][:10]
-        if first_match_date != today.strftime("%Y-%m-%d"):
+        first_match_date = get_fixture_dublin_date(round_matches[0])
+        if first_match_date != today.isoformat():
             print(f"First match is on {first_match_date}, not today. Exiting.")
             return
 
         title = (
-            f"Sports Direct FAI Cup - {current_round} Discussion Thread / "
+            f"Sports Direct FAI Cup - {current_round_display} Discussion Thread / "
             f"{today.strftime('%d-%m-%Y')}"
         )
 
-        body = build_post_body(round_matches, current_round)
+        body = build_post_body(round_matches, current_round_display)
 
         post_id = submit_reddit_post(title, body)
 
@@ -197,7 +255,7 @@ def main():
         cache["fai_cup"] = {
             "post_id": post_id,
             "match_dates": match_dates,
-            "round": current_round,
+            "round": current_round_display,
             "posted_at": now.isoformat()
         }
         save_cache(cache)

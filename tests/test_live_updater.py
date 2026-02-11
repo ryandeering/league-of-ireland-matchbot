@@ -1,7 +1,7 @@
 """Integration tests for live updater functionality."""
 
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, Mock
 from datetime import date
 
 
@@ -110,6 +110,29 @@ class TestLiveUpdaterLogic(unittest.TestCase):
                     break
 
         self.assertFalse(has_matches_today)
+
+    @patch("live_updater.client.get_league_table")
+    def test_get_league_table_uses_stale_cache_on_fetch_failure(
+        self,
+        mock_get_league_table,
+    ):
+        """Test stale table cache is used when fresh table fetch fails."""
+        import live_updater
+
+        league_id = 126
+        stale_table = [{"rank": 1, "team": {"id": 1, "name": "Team A"}}]
+
+        live_updater._table_cache.clear()
+        live_updater._table_cache[league_id] = {
+            "data": stale_table,
+            "expires": 0,
+        }
+        mock_get_league_table.return_value = None
+
+        result = live_updater.get_league_table(league_id)
+
+        self.assertEqual(result, stale_table)
+        self.assertEqual(live_updater._table_cache[league_id]["data"], stale_table)
 
 
 class TestLiveUpdaterIntegration(unittest.TestCase):
@@ -402,6 +425,52 @@ class TestCleanupFinishedMatchDay(unittest.TestCase):
         self.assertIn(today_str, cache["premier_division"]["match_dates"])
         mock_save_cache.assert_not_called()
 
+    @patch("live_updater.save_cache")
+    @patch("live_updater.get_league_fixtures")
+    def test_no_cleanup_when_ft_and_ns_same_day(
+        self, mock_get_fixtures, mock_save_cache
+    ):
+        """Test no cleanup when one match is FT but another is NS (not started).
+
+        Regression: previous code excluded NS fixtures from the 'all finished'
+        check, causing premature cleanup while later matches hadn't kicked off.
+        """
+        from live_updater import _cleanup_finished_match_day
+
+        today = date.today()
+        today_str = today.isoformat()
+
+        cache = {
+            "premier_division": {
+                "post_id": "test123",
+                "match_dates": [today_str],
+            }
+        }
+
+        # One finished, one not started - must NOT clean up
+        mock_get_fixtures.return_value = [
+            {
+                "fixture": {
+                    "date": f"{today_str}T15:00:00+00:00",
+                    "status": {"short": "FT"},
+                },
+                "league": {"id": 126},
+            },
+            {
+                "fixture": {
+                    "date": f"{today_str}T19:45:00+00:00",
+                    "status": {"short": "NS"},
+                },
+                "league": {"id": 126},
+            },
+        ]
+
+        _cleanup_finished_match_day(cache, today)
+
+        # Should NOT have removed today - NS match still pending
+        self.assertIn(today_str, cache["premier_division"]["match_dates"])
+        mock_save_cache.assert_not_called()
+
     @patch("live_updater.get_league_fixtures")
     def test_get_todays_fixtures_filters_correctly(self, mock_get_fixtures):
         """Test _get_todays_fixtures filters to today only."""
@@ -426,11 +495,16 @@ class TestCleanupFinishedMatchDay(unittest.TestCase):
 class TestLiveUpdaterErrorHandling(unittest.TestCase):
     """Test live updater error handling."""
 
+    @patch("live_updater.update_league_thread")
     @patch("live_updater._cleanup_finished_match_day")
     @patch("live_updater.load_cache")
     @patch("live_updater.get_live_fixtures")
     def test_handles_empty_live_fixtures(
-        self, mock_get_fixtures, mock_load_cache, mock_cleanup
+        self,
+        mock_get_fixtures,
+        mock_load_cache,
+        mock_cleanup,
+        mock_update_league_thread,
     ):
         """Test handling when no live fixtures returned."""
         today = date.today().isoformat()
@@ -447,7 +521,70 @@ class TestLiveUpdaterErrorHandling(unittest.TestCase):
 
         # Should handle gracefully and call cleanup
         main()
+        mock_update_league_thread.assert_called_once_with(
+            "premier_division",
+            mock_load_cache.return_value["premier_division"],
+            [],
+            126,
+        )
         mock_cleanup.assert_called_once()
+
+    @patch("live_updater.update_league_thread")
+    @patch("live_updater.load_cache")
+    @patch("live_updater.get_live_fixtures")
+    def test_updates_competitions_without_live_fixtures(
+        self,
+        mock_get_fixtures,
+        mock_load_cache,
+        mock_update_league_thread,
+    ):
+        """Test all competitions with matches today are updated each cycle."""
+        today = date.today().isoformat()
+        mock_load_cache.return_value = {
+            "premier_division": {
+                "post_id": "prem_123",
+                "match_dates": [today],
+                "round": "Regular Season - 32",
+            },
+            "first_division": {
+                "post_id": "first_456",
+                "match_dates": [today],
+                "round": "Regular Season - 28",
+            },
+        }
+
+        mock_get_fixtures.return_value = [
+            {
+                "fixture": {
+                    "id": 111,
+                    "status": {"short": "1H", "elapsed": 23},
+                    "date": f"{today}T19:45:00+00:00",
+                    "venue": {"name": "Richmond Park"},
+                },
+                "league": {"id": 126},
+                "goals": {"home": 1, "away": 0},
+                "teams": {
+                    "home": {"name": "St Patrick's Athletic", "id": 1},
+                    "away": {"name": "Shelbourne", "id": 2},
+                },
+            }
+        ]
+
+        from live_updater import main
+
+        main()
+
+        self.assertEqual(mock_update_league_thread.call_count, 2)
+
+        calls_by_competition = {
+            call_args.args[0]: call_args.args
+            for call_args in mock_update_league_thread.call_args_list
+        }
+
+        self.assertIn("premier_division", calls_by_competition)
+        self.assertIn("first_division", calls_by_competition)
+        self.assertEqual(len(calls_by_competition["premier_division"][2]), 1)
+        self.assertEqual(calls_by_competition["first_division"][2], [])
 
     @patch("live_updater.update_reddit_post")
     @patch("live_updater.get_league_table")
@@ -516,6 +653,57 @@ class TestLiveUpdaterErrorHandling(unittest.TestCase):
 
         # Both posts should be attempted
         self.assertEqual(mock_update_post.call_count, 2)
+
+
+class TestUpdateRedditPost(unittest.TestCase):
+    """Test Reddit post update behavior."""
+
+    @patch("live_updater.praw.Reddit")
+    def test_skips_edit_when_body_unchanged(self, mock_reddit_cls):
+        """Test that update_reddit_post skips the edit when body is identical."""
+        import live_updater
+
+        live_updater._last_body.clear()
+
+        post_id = "test_skip_123"
+        body = "Some body content"
+
+        # First call should edit
+        mock_submission = mock_reddit_cls.return_value.submission.return_value
+        result1 = live_updater.update_reddit_post(post_id, body)
+        self.assertTrue(result1)
+        mock_submission.edit.assert_called_once_with(body)
+
+        # Second call with same body should skip
+        mock_submission.edit.reset_mock()
+        result2 = live_updater.update_reddit_post(post_id, body)
+        self.assertTrue(result2)
+        mock_submission.edit.assert_not_called()
+
+        # Third call with different body should edit again
+        new_body = "Updated body content"
+        result3 = live_updater.update_reddit_post(post_id, new_body)
+        self.assertTrue(result3)
+        mock_submission.edit.assert_called_once_with(new_body)
+
+        live_updater._last_body.clear()
+
+    @patch("live_updater.praw.Reddit")
+    def test_catches_prawcore_exception(self, mock_reddit_cls):
+        """Test that prawcore exceptions are caught and don't crash."""
+        import prawcore
+        import live_updater
+
+        live_updater._last_body.clear()
+
+        mock_reddit_cls.return_value.submission.side_effect = (
+            prawcore.exceptions.ServerError(Mock())
+        )
+
+        result = live_updater.update_reddit_post("test_123", "body")
+        self.assertFalse(result)
+
+        live_updater._last_body.clear()
 
 
 class TestLOIPremierRound1Simulation(unittest.TestCase):

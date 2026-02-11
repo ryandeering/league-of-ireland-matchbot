@@ -112,6 +112,24 @@ def parse_match_datetime(
     return match_datetime_local
 
 
+def get_fixture_dublin_date(fixture: Dict[str, Any]) -> str:
+    """Get fixture date as a Dublin-local ISO date string (YYYY-MM-DD).
+
+    Handles DST correctly so late UTC matches are grouped under the
+    right local day.
+
+    Args:
+        fixture: Fixture dictionary (outer dict containing "fixture" key)
+
+    Returns:
+        Date string in YYYY-MM-DD format (Dublin timezone), or ""
+    """
+    date_str = fixture.get("fixture", {}).get("date", "")
+    if not date_str:
+        return ""
+    return parse_match_datetime(date_str).date().isoformat()
+
+
 def get_match_status_display(fixture: Dict[str, Any]) -> Tuple[str, str]:
     """Get display text for match status and score.
 
@@ -124,14 +142,8 @@ def get_match_status_display(fixture: Dict[str, Any]) -> Tuple[str, str]:
     """
     status = fixture.get("fixture", {}).get("status", {}).get("short", "NS")
     elapsed = fixture.get("fixture", {}).get("status", {}).get("elapsed")
-    home_score = fixture.get("goals", {}).get("home", 0)
-    away_score = fixture.get("goals", {}).get("away", 0)
-
-    # API can return null scores during pre-match
-    home_score = home_score if home_score is not None else 0
-    away_score = away_score if away_score is not None else 0
-
-    score_display = f"{home_score}-{away_score}"
+    home_score = fixture.get("goals", {}).get("home")
+    away_score = fixture.get("goals", {}).get("away")
 
     fixture_date = fixture.get("fixture", {}).get("date")
     if fixture_date:
@@ -142,6 +154,12 @@ def get_match_status_display(fixture: Dict[str, Any]) -> Tuple[str, str]:
     # Pre-match
     if status in ["TBD", "NS"]:
         return "vs", kickoff_time
+
+    # For started/finished matches, handle missing scores
+    if home_score is not None and away_score is not None:
+        score_display = f"{home_score}-{away_score}"
+    else:
+        score_display = "vs"
 
     # Live match statuses - map status codes to display text
     status_map = {
@@ -292,33 +310,42 @@ def extract_scorers(
             "own_goal": event.get("detail", "") == "Own Goal",
         }
 
-        team = event.get("team", {}).get("name")
-        home_team = fixture.get("teams", {}).get("home", {}).get("name")
-
-        if team and home_team and team == home_team:
-            scorers["home"].append(scorer_info)
-        elif team:
-            scorers["away"].append(scorer_info)
+        # Prefer isHome flag from matchDetails (avoids name-variant mismatches)
+        is_home = event.get("isHome")
+        if is_home is not None:
+            if is_home:
+                scorers["home"].append(scorer_info)
+            else:
+                scorers["away"].append(scorer_info)
+        else:
+            # Fallback to team name comparison
+            team = event.get("team", {}).get("name")
+            home_team = fixture.get("teams", {}).get("home", {}).get("name")
+            if team and home_team and team == home_team:
+                scorers["home"].append(scorer_info)
+            elif team:
+                scorers["away"].append(scorer_info)
 
     return scorers
 
 
 def filter_weekly_matches(all_matches, today_date):
-    """Filter matches to next 7 days.
+    """Filter matches to the current weekly window.
 
     Args:
         all_matches: List of match fixtures from API
         today_date: Today's date (datetime.date object)
 
     Returns:
-        List of matches within the next 7 days
+        List of matches from today up to (but not including)
+        the same weekday next week
     """
-    week_end = today_date + timedelta(days=7)
+    week_end_exclusive = today_date + timedelta(days=7)
     return [
         m for m in all_matches
         if (today_date <=
-            parse_match_datetime(m["fixture"]["date"]).date() <=
-            week_end)
+            parse_match_datetime(m["fixture"]["date"]).date() <
+            week_end_exclusive)
     ]
 
 

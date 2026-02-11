@@ -22,6 +22,7 @@ from common import (
     save_cache,
     filter_weekly_matches,
     get_match_date_range,
+    get_fixture_dublin_date,
 )
 from match_client import (
     MatchDataClient,
@@ -63,7 +64,7 @@ def get_league_table():
         List of team standings in api-football compatible format
     """
     raw_table = client.get_league_table(LEAGUE_ID_PREMIER)
-    return convert_raw_table(raw_table)
+    return convert_raw_table(raw_table or [])
 
 
 def submit_reddit_post(title, body):
@@ -92,7 +93,7 @@ def build_post_body(matches_data, league_table):
 
     matches_by_date = {}
     for match in matches_data:
-        date = match["fixture"]["date"][:10]
+        date = get_fixture_dublin_date(match)
         matches_by_date.setdefault(date, []).append(match)
 
     body = "*Live scores will be updated during matches*\n\n"

@@ -148,14 +148,16 @@ class MatchDataClient:
 
         return fixtures.get("allMatches", [])
 
-    def get_league_table(self, league_id: int) -> list[dict[str, Any]]:
+    def get_league_table(
+        self, league_id: int
+    ) -> Optional[list[dict[str, Any]]]:
         """Get league standings table.
 
         Args:
             league_id: League ID
 
         Returns:
-            List of team standings
+            List of team standings, or None if the request fails
         """
         try:
             data = self._get("/leagues", params={"id": league_id})
@@ -170,7 +172,7 @@ class MatchDataClient:
             return []
         except requests.exceptions.RequestException as exc:
             logger.error("Error fetching league %s table: %s", league_id, exc)
-            return []
+            return None
 
     def get_live_matches(self, league_ids: list[int]) -> list[dict[str, Any]]:
         """Get currently live matches for specified leagues.
@@ -296,7 +298,7 @@ def convert_raw_match(raw_match: dict[str, Any]) -> dict[str, Any]:
         },
         "league": {
             "id": raw_match.get("_league_id", 0),
-            "round": f"Regular Season - {raw_match.get('round', '')}",
+            "round": f"Regular Season - {raw_match.get('round') or ''}",
         },
         "teams": {
             "home": {
@@ -369,26 +371,59 @@ def extract_venue_from_details(match_details: dict[str, Any]) -> str:
     return stadium.get("name", "")
 
 
+def extract_score_from_details(
+    match_details: dict[str, Any],
+) -> tuple[Optional[int], Optional[int]]:
+    """Extract home and away scores from match details header.
+
+    FotMob's leagues endpoint can return null scores for LOI matches,
+    but the matchDetails endpoint includes them in header.teams[].score.
+
+    Args:
+        match_details: Full match details from API
+
+    Returns:
+        Tuple of (home_score, away_score), or (None, None) if not found
+    """
+    header = match_details.get("header", {})
+    teams = header.get("teams", [])
+    if len(teams) >= 2:
+        home_score = teams[0].get("score")
+        away_score = teams[1].get("score")
+        if home_score is not None and away_score is not None:
+            return int(home_score), int(away_score)
+    return None, None
+
+
 def enrich_fixtures_with_venues(
     client: MatchDataClient,
     fixtures: list[dict[str, Any]]
 ) -> list[dict[str, Any]]:
-    """Fetch venue data for each fixture from match details endpoint.
+    """Fetch venue and score data for each fixture from match details endpoint.
+
+    Also fills in missing scores from matchDetails when the leagues
+    endpoint returns null (common for LOI).
 
     Args:
         client: MatchDataClient instance
         fixtures: List of fixtures in api-football format
 
     Returns:
-        Same fixtures with venue names populated
+        Same fixtures with venue names and scores populated
     """
     for fixture in fixtures:
         match_id = fixture.get("fixture", {}).get("id")
         if match_id:
             details = client.get_match_details(match_id)
-            venue = extract_venue_from_details(details)
-            if venue:
-                fixture["fixture"]["venue"]["name"] = venue
+            if details:
+                venue = extract_venue_from_details(details)
+                if venue:
+                    fixture["fixture"]["venue"]["name"] = venue
+                if fixture.get("goals", {}).get("home") is None:
+                    home, away = extract_score_from_details(details)
+                    if home is not None:
+                        fixture["goals"]["home"] = home
+                        fixture["goals"]["away"] = away
     return fixtures
 
 
@@ -432,6 +467,7 @@ def convert_match_events(match_details: dict[str, Any]) -> list[dict[str, Any]]:
                 "player": {"name": event.get("nameStr", "Unknown")},
                 "time": {"elapsed": event.get("time", 0)},
                 "detail": detail,
+                "isHome": is_home,
             })
 
     return events

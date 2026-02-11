@@ -4,6 +4,9 @@ import unittest
 from common import (
     get_match_status_display,
     format_live_fixture,
+    parse_match_datetime,
+    get_fixture_dublin_date,
+    filter_weekly_matches,
 )
 
 
@@ -253,6 +256,178 @@ class TestMatchStatusEdgeCases(unittest.TestCase):
         fixture["fixture"]["status"]["elapsed"] = 95
         _, status = get_match_status_display(fixture)
         self.assertEqual(status, "95'")
+
+
+class TestNullScoreHandling(unittest.TestCase):
+    """Regression tests: null scores must not render as 0-0."""
+
+    def test_null_scores_started_match_shows_vs(self):
+        """Started match with null scores should show 'vs', not '0-0'."""
+        fixture = {
+            "fixture": {
+                "status": {"short": "2H", "elapsed": 67},
+                "date": "2025-07-18T19:45:00+00:00",
+                "venue": {"name": "Stadium"},
+            },
+            "goals": {"home": None, "away": None},
+            "teams": {
+                "home": {"name": "Team A", "id": 1},
+                "away": {"name": "Team B", "id": 2},
+            },
+        }
+        score, status = get_match_status_display(fixture)
+        self.assertEqual(score, "vs")
+        self.assertNotEqual(score, "0-0")
+        self.assertEqual(status, "67'")
+
+    def test_null_scores_finished_match_shows_vs(self):
+        """Finished match with null scores should show 'vs', not '0-0'."""
+        fixture = {
+            "fixture": {
+                "status": {"short": "FT", "elapsed": 90},
+                "date": "2025-07-18T19:45:00+00:00",
+                "venue": {"name": "Stadium"},
+            },
+            "goals": {"home": None, "away": None},
+            "teams": {
+                "home": {"name": "Team A", "id": 1},
+                "away": {"name": "Team B", "id": 2},
+            },
+        }
+        score, status = get_match_status_display(fixture)
+        self.assertEqual(score, "vs")
+        self.assertEqual(status, "FT")
+
+    def test_null_scores_half_time_shows_vs(self):
+        """HT match with null scores should show 'vs', not '0-0'."""
+        fixture = {
+            "fixture": {
+                "status": {"short": "HT", "elapsed": None},
+                "date": "2025-07-18T19:45:00+00:00",
+                "venue": {"name": "Stadium"},
+            },
+            "goals": {"home": None, "away": None},
+            "teams": {
+                "home": {"name": "Team A", "id": 1},
+                "away": {"name": "Team B", "id": 2},
+            },
+        }
+        score, _ = get_match_status_display(fixture)
+        self.assertEqual(score, "vs")
+
+    def test_zero_zero_score_still_renders(self):
+        """Actual 0-0 score (not null) should still display correctly."""
+        fixture = {
+            "fixture": {
+                "status": {"short": "HT", "elapsed": None},
+                "date": "2025-07-18T19:45:00+00:00",
+                "venue": {"name": "Stadium"},
+            },
+            "goals": {"home": 0, "away": 0},
+            "teams": {
+                "home": {"name": "Team A", "id": 1},
+                "away": {"name": "Team B", "id": 2},
+            },
+        }
+        score, _ = get_match_status_display(fixture)
+        self.assertEqual(score, "0-0")
+
+
+class TestDSTTransitions(unittest.TestCase):
+    """Test Dublin timezone / DST handling in parse_match_datetime."""
+
+    def test_summer_late_match_crosses_dublin_midnight(self):
+        """23:30 UTC during IST (summer) = 00:30 next day in Dublin."""
+        result = parse_match_datetime("2025-07-18T23:30:00Z")
+        self.assertEqual(result.date().isoformat(), "2025-07-19")
+        self.assertEqual(result.strftime("%H:%M"), "00:30")
+
+    def test_winter_late_match_same_day(self):
+        """23:30 UTC during GMT (winter) = 23:30 same day in Dublin."""
+        result = parse_match_datetime("2025-12-18T23:30:00Z")
+        self.assertEqual(result.date().isoformat(), "2025-12-18")
+        self.assertEqual(result.strftime("%H:%M"), "23:30")
+
+    def test_summer_normal_kickoff(self):
+        """19:45 UTC during IST = 20:45 same day in Dublin."""
+        result = parse_match_datetime("2025-07-18T19:45:00Z")
+        self.assertEqual(result.date().isoformat(), "2025-07-18")
+        self.assertEqual(result.strftime("%H:%M"), "20:45")
+
+    def test_winter_normal_kickoff(self):
+        """19:45 UTC during GMT = 19:45 same day in Dublin."""
+        result = parse_match_datetime("2026-02-06T19:45:00Z")
+        self.assertEqual(result.date().isoformat(), "2026-02-06")
+        self.assertEqual(result.strftime("%H:%M"), "19:45")
+
+
+class TestDublinDateGrouping(unittest.TestCase):
+    """Regression tests: date grouping must use Dublin-local date."""
+
+    def test_summer_late_utc_grouped_under_dublin_date(self):
+        """A 23:30 UTC match during IST should be grouped under the Dublin date."""
+        fixture = {"fixture": {"date": "2025-07-18T23:30:00Z"}}
+        dublin_date = get_fixture_dublin_date(fixture)
+        utc_date = fixture["fixture"]["date"][:10]
+
+        self.assertEqual(dublin_date, "2025-07-19")
+        self.assertEqual(utc_date, "2025-07-18")
+        self.assertNotEqual(dublin_date, utc_date)
+
+    def test_winter_normal_match_same_date(self):
+        """Normal winter kickoff should be same date in UTC and Dublin."""
+        fixture = {"fixture": {"date": "2026-02-06T19:45:00Z"}}
+        dublin_date = get_fixture_dublin_date(fixture)
+        utc_date = fixture["fixture"]["date"][:10]
+
+        self.assertEqual(dublin_date, "2026-02-06")
+        self.assertEqual(dublin_date, utc_date)
+
+    def test_empty_date_returns_empty_string(self):
+        """Fixture with no date should return empty string."""
+        fixture = {"fixture": {"date": ""}}
+        self.assertEqual(get_fixture_dublin_date(fixture), "")
+
+        fixture_no_key = {"fixture": {}}
+        self.assertEqual(get_fixture_dublin_date(fixture_no_key), "")
+
+
+class TestWeeklyFiltering(unittest.TestCase):
+    """Regression tests for weekly fixture filtering window."""
+
+    def test_excludes_same_weekday_next_week(self):
+        """Friday run should not include fixtures on next Friday."""
+        run_date = parse_match_datetime("2026-02-13T12:00:00Z").date()
+        fixtures = [
+            {"fixture": {"date": "2026-02-13T19:45:00Z"}},
+            {"fixture": {"date": "2026-02-19T19:45:00Z"}},
+            {"fixture": {"date": "2026-02-20T19:45:00Z"}},
+        ]
+
+        weekly = filter_weekly_matches(fixtures, run_date)
+        dates = sorted({parse_match_datetime(m["fixture"]["date"]).date().isoformat()
+                        for m in weekly})
+
+        self.assertEqual(dates, ["2026-02-13", "2026-02-19"])
+
+    def test_includes_today_and_next_six_days(self):
+        """Window includes today and day+6, but excludes day+7."""
+        run_date = parse_match_datetime("2026-02-13T12:00:00Z").date()
+        fixtures = [
+            {"fixture": {"date": "2026-02-13T10:00:00Z"}},  # day 0
+            {"fixture": {"date": "2026-02-19T22:00:00Z"}},  # day 6
+            {"fixture": {"date": "2026-02-20T10:00:00Z"}},  # day 7
+        ]
+
+        weekly = filter_weekly_matches(fixtures, run_date)
+        included_dates = {
+            parse_match_datetime(m["fixture"]["date"]).date().isoformat()
+            for m in weekly
+        }
+
+        self.assertIn("2026-02-13", included_dates)
+        self.assertIn("2026-02-19", included_dates)
+        self.assertNotIn("2026-02-20", included_dates)
 
 
 if __name__ == "__main__":
