@@ -5,6 +5,7 @@ Polls external API for live scores and updates Reddit posts.
 
 import logging
 import time
+import hashlib
 from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -52,11 +53,30 @@ _table_cache: dict[int, dict[str, Any]] = {}
 # Per-run cache for matchDetails scores (fixture_id -> (home, away))
 _score_cache: dict[int, tuple[int, int]] = {}
 
-# Per-run cache of last posted body per post_id (avoids redundant Reddit edits)
+# Per-run cache of last posted body hash per post_id
 _last_body: dict[str, str] = {}
 
 # Match data client instance
 client = MatchDataClient()
+
+
+def _compute_body_hash(body: str) -> str:
+    """Return SHA-256 hash for a post body."""
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+
+def _persist_body_hash(post_id: str, body_hash: str) -> None:
+    """Persist post body hash to cache for cross-run deduplication."""
+    try:
+        cache = load_cache()
+        body_hashes = cache.get("_body_hashes")
+        if not isinstance(body_hashes, dict):
+            body_hashes = {}
+            cache["_body_hashes"] = body_hashes
+        body_hashes[post_id] = body_hash
+        save_cache(cache)
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        logger.warning("Could not persist body hash for post %s: %s", post_id, exc)
 
 
 def _fetch_match_details(
@@ -383,9 +403,28 @@ def update_reddit_post(post_id: str, new_body: str) -> bool:
     Returns:
         True if successful, False otherwise
     """
-    if _last_body.get(post_id) == new_body:
+    body_hash = _compute_body_hash(new_body)
+    if _last_body.get(post_id) == body_hash:
         logger.debug("Body unchanged for post %s, skipping edit", post_id)
         return True
+
+    try:
+        cache = load_cache()
+        cached_hashes = cache.get("_body_hashes", {})
+        cached_hash = (
+            cached_hashes.get(post_id)
+            if isinstance(cached_hashes, dict)
+            else None
+        )
+        if cached_hash == body_hash:
+            _last_body[post_id] = body_hash
+            logger.debug(
+                "Body unchanged for post %s via persisted hash, skipping edit",
+                post_id,
+            )
+            return True
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        logger.warning("Could not read persisted body hash for post %s: %s", post_id, exc)
 
     try:
         reddit = praw.Reddit(
@@ -398,7 +437,8 @@ def update_reddit_post(post_id: str, new_body: str) -> bool:
 
         post = reddit.submission(id=post_id)
         post.edit(new_body)
-        _last_body[post_id] = new_body
+        _last_body[post_id] = body_hash
+        _persist_body_hash(post_id, body_hash)
         logger.info("Updated post %s", post_id)
         return True
     except (
@@ -520,6 +560,13 @@ def update_league_thread(
     fixtures = _get_weekly_fixtures_with_live_scores(
         league_id, match_dates, live_fixtures
     )
+    if not fixtures and match_dates:
+        logger.warning(
+            "Skipping %s update: API returned no fixtures but "
+            "match dates are expected. Possible transient API failure.",
+            comp_display,
+        )
+        return
 
     if competition_name == "premier_division":
         new_body = build_premier_body(fixtures, league_table)
@@ -555,47 +602,45 @@ def _get_todays_fixtures(today, league_ids):
     return todays_fixtures
 
 
-def _cleanup_finished_match_day(cache, today):
-    """Remove today from cache if all matches have finished.
+def _cleanup_finished_match_day(cache, today, competitions_today):
+    """Remove today from cache when tracked competitions finish.
 
     Args:
         cache: The current cache dictionary
         today: Today's date
+        competitions_today: Mapping of tracked competition names to league IDs
     """
-    league_ids = [LEAGUE_ID_PREMIER, LEAGUE_ID_FIRST, LEAGUE_ID_FAI_CUP]
-    todays_fixtures = _get_todays_fixtures(today, league_ids)
-
-    if not todays_fixtures:
-        logger.info("No fixtures found for today.")
-        return
-
     finished_statuses = {"FT", "AET", "PEN", "CANC", "ABD", "PST", "AWD", "WO"}
-    all_finished = all(
-        f.get("fixture", {}).get("status", {}).get("short") in finished_statuses
-        for f in todays_fixtures
-    )
+    today_str = today.isoformat()
+    cache_updated = False
 
-    if all_finished:
-        logger.info("All of today's matches have finished.")
-        today_str = today.isoformat()
-        cache_updated = False
-        for comp_name in ["premier_division", "first_division", "fai_cup"]:
-            if comp_name in cache:
-                match_dates = cache[comp_name].get("match_dates", [])
-                if today_str in match_dates:
-                    match_dates.remove(today_str)
-                    cache_updated = True
-                    logger.info("Removed %s from %s match_dates", today_str, comp_name)
-        if cache_updated:
-            save_cache(cache)
-    else:
-        logger.info("Some matches still in progress or not yet finished.")
+    for comp_name, league_id in competitions_today.items():
+        todays_fixtures = _get_todays_fixtures(today, [league_id])
+        if not todays_fixtures:
+            logger.info("No %s fixtures found for today.", comp_name)
+            continue
+
+        all_finished = all(
+            f.get("fixture", {}).get("status", {}).get("short") in finished_statuses
+            for f in todays_fixtures
+        )
+        if not all_finished:
+            logger.info("%s still has matches in progress or not yet finished.", comp_name)
+            continue
+
+        match_dates = cache.get(comp_name, {}).get("match_dates", [])
+        if today_str in match_dates:
+            match_dates.remove(today_str)
+            cache_updated = True
+            logger.info("Removed %s from %s match_dates", today_str, comp_name)
+
+    if cache_updated:
+        save_cache(cache)
 
 
 def main():
     """Main function - fetch live scores and update Reddit posts."""
     _score_cache.clear()
-    _last_body.clear()
     today = datetime.now(ZoneInfo("Europe/Dublin")).date()
 
     cache = load_cache()
@@ -629,7 +674,7 @@ def main():
         )
         for comp_name, league_id in competitions_today.items():
             update_league_thread(comp_name, cache[comp_name], [], league_id)
-        _cleanup_finished_match_day(cache, today)
+        _cleanup_finished_match_day(cache, today, competitions_today)
         return
 
     logger.info("Found %d live fixtures", len(live_fixtures))

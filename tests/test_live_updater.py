@@ -1,5 +1,6 @@
 """Integration tests for live updater functionality."""
 
+import hashlib
 import unittest
 from unittest.mock import patch, Mock
 from datetime import date
@@ -341,7 +342,7 @@ class TestCleanupFinishedMatchDay(unittest.TestCase):
             },
         ]
 
-        _cleanup_finished_match_day(cache, today)
+        _cleanup_finished_match_day(cache, today, {"premier_division": 126})
 
         # Should have removed today from match_dates
         self.assertNotIn(today_str, cache["premier_division"]["match_dates"])
@@ -377,7 +378,7 @@ class TestCleanupFinishedMatchDay(unittest.TestCase):
             },
         ]
 
-        _cleanup_finished_match_day(cache, today)
+        _cleanup_finished_match_day(cache, today, {"premier_division": 126})
 
         # Should NOT have removed today
         self.assertIn(today_str, cache["premier_division"]["match_dates"])
@@ -419,7 +420,7 @@ class TestCleanupFinishedMatchDay(unittest.TestCase):
             },
         ]
 
-        _cleanup_finished_match_day(cache, today)
+        _cleanup_finished_match_day(cache, today, {"premier_division": 126})
 
         # Should NOT have removed today
         self.assertIn(today_str, cache["premier_division"]["match_dates"])
@@ -465,7 +466,7 @@ class TestCleanupFinishedMatchDay(unittest.TestCase):
             },
         ]
 
-        _cleanup_finished_match_day(cache, today)
+        _cleanup_finished_match_day(cache, today, {"premier_division": 126})
 
         # Should NOT have removed today - NS match still pending
         self.assertIn(today_str, cache["premier_division"]["match_dates"])
@@ -490,6 +491,143 @@ class TestCleanupFinishedMatchDay(unittest.TestCase):
         self.assertEqual(len(result), 2)
         for fixture in result:
             self.assertTrue(fixture["fixture"]["date"].startswith(today_str))
+
+    @patch("live_updater.save_cache")
+    @patch("live_updater.get_league_fixtures")
+    def test_cleanup_only_checks_tracked_leagues(
+        self, mock_get_fixtures, mock_save_cache
+    ):
+        """Test cleanup ignores untracked leagues."""
+        from live_updater import _cleanup_finished_match_day
+
+        today = date.today()
+        today_str = today.isoformat()
+
+        cache = {
+            "premier_division": {"post_id": "prem123", "match_dates": [today_str]},
+            "fai_cup": {"post_id": "cup123", "match_dates": [today_str]},
+        }
+
+        mock_get_fixtures.return_value = [
+            {
+                "fixture": {
+                    "date": f"{today_str}T19:45:00+00:00",
+                    "status": {"short": "FT"},
+                }
+            }
+        ]
+
+        _cleanup_finished_match_day(cache, today, {"premier_division": 126})
+
+        self.assertNotIn(today_str, cache["premier_division"]["match_dates"])
+        self.assertIn(today_str, cache["fai_cup"]["match_dates"])
+        mock_get_fixtures.assert_called_once_with(126)
+        mock_save_cache.assert_called_once()
+
+    @patch("live_updater.save_cache")
+    @patch("live_updater.get_league_fixtures")
+    def test_cleanup_per_league_independent(self, mock_get_fixtures, mock_save_cache):
+        """Test one competition can clean up while another remains active."""
+        from live_updater import _cleanup_finished_match_day
+
+        today = date.today()
+        today_str = today.isoformat()
+
+        cache = {
+            "premier_division": {"post_id": "prem123", "match_dates": [today_str]},
+            "first_division": {"post_id": "first123", "match_dates": [today_str]},
+        }
+
+        def _fixtures_for_league(league_id):
+            if league_id == 126:
+                return [
+                    {
+                        "fixture": {
+                            "date": f"{today_str}T19:45:00+00:00",
+                            "status": {"short": "FT"},
+                        }
+                    }
+                ]
+            return [
+                {
+                    "fixture": {
+                        "date": f"{today_str}T19:45:00+00:00",
+                        "status": {"short": "NS"},
+                    }
+                }
+            ]
+
+        mock_get_fixtures.side_effect = _fixtures_for_league
+
+        _cleanup_finished_match_day(
+            cache,
+            today,
+            {"premier_division": 126, "first_division": 218},
+        )
+
+        self.assertNotIn(today_str, cache["premier_division"]["match_dates"])
+        self.assertIn(today_str, cache["first_division"]["match_dates"])
+        mock_save_cache.assert_called_once()
+
+
+class TestUpdateLeagueThreadGuards(unittest.TestCase):
+    """Test guardrails while composing league thread updates."""
+
+    @patch("live_updater.update_reddit_post")
+    @patch("live_updater.get_league_table")
+    @patch("live_updater._get_weekly_fixtures_with_live_scores")
+    def test_skips_edit_when_api_returns_empty_fixtures(
+        self,
+        mock_weekly_fixtures,
+        mock_get_table,
+        mock_update_post,
+    ):
+        """If match dates exist but fixtures are empty, skip edit."""
+        from live_updater import update_league_thread
+
+        cache_data = {"post_id": "prem123", "match_dates": ["2026-02-11"]}
+        mock_weekly_fixtures.return_value = []
+        mock_get_table.return_value = []
+
+        update_league_thread("premier_division", cache_data, [], 126)
+
+        mock_update_post.assert_not_called()
+
+    @patch("live_updater.update_reddit_post")
+    @patch("live_updater.get_league_table")
+    @patch("live_updater._get_weekly_fixtures_with_live_scores")
+    def test_allows_edit_when_fixtures_populated(
+        self,
+        mock_weekly_fixtures,
+        mock_get_table,
+        mock_update_post,
+    ):
+        """When fixtures exist, normal update flow should continue."""
+        from live_updater import update_league_thread
+
+        cache_data = {"post_id": "prem123", "match_dates": ["2026-02-11"]}
+        mock_weekly_fixtures.return_value = [
+            {
+                "fixture": {
+                    "id": 1,
+                    "status": {"short": "NS", "elapsed": None},
+                    "date": "2026-02-11T19:45:00+00:00",
+                    "venue": {"name": "Stadium"},
+                },
+                "league": {"id": 126},
+                "goals": {"home": None, "away": None},
+                "teams": {
+                    "home": {"name": "Team A", "id": 1},
+                    "away": {"name": "Team B", "id": 2},
+                },
+                "events": [],
+            }
+        ]
+        mock_get_table.return_value = []
+
+        update_league_thread("premier_division", cache_data, [], 126)
+
+        mock_update_post.assert_called_once()
 
 
 class TestLiveUpdaterErrorHandling(unittest.TestCase):
@@ -528,6 +666,10 @@ class TestLiveUpdaterErrorHandling(unittest.TestCase):
             126,
         )
         mock_cleanup.assert_called_once()
+        cleanup_args = mock_cleanup.call_args.args
+        self.assertEqual(cleanup_args[0], mock_load_cache.return_value)
+        self.assertEqual(cleanup_args[1].isoformat(), today)
+        self.assertEqual(cleanup_args[2], {"premier_division": 126})
 
     @patch("live_updater.update_league_thread")
     @patch("live_updater.load_cache")
@@ -658,12 +800,26 @@ class TestLiveUpdaterErrorHandling(unittest.TestCase):
 class TestUpdateRedditPost(unittest.TestCase):
     """Test Reddit post update behavior."""
 
+    def setUp(self):
+        """Reset in-memory body-hash cache before each test."""
+        import live_updater
+        live_updater._last_body.clear()
+
+    def tearDown(self):
+        """Reset in-memory body-hash cache after each test."""
+        import live_updater
+        live_updater._last_body.clear()
+
+    @patch("live_updater.save_cache")
+    @patch("live_updater.load_cache")
     @patch("live_updater.praw.Reddit")
-    def test_skips_edit_when_body_unchanged(self, mock_reddit_cls):
+    def test_skips_edit_when_body_unchanged(
+        self, mock_reddit_cls, mock_load_cache, mock_save_cache
+    ):
         """Test that update_reddit_post skips the edit when body is identical."""
         import live_updater
 
-        live_updater._last_body.clear()
+        mock_load_cache.return_value = {}
 
         post_id = "test_skip_123"
         body = "Some body content"
@@ -685,16 +841,19 @@ class TestUpdateRedditPost(unittest.TestCase):
         result3 = live_updater.update_reddit_post(post_id, new_body)
         self.assertTrue(result3)
         mock_submission.edit.assert_called_once_with(new_body)
+        self.assertEqual(mock_save_cache.call_count, 2)
 
-        live_updater._last_body.clear()
-
+    @patch("live_updater.save_cache")
+    @patch("live_updater.load_cache")
     @patch("live_updater.praw.Reddit")
-    def test_catches_prawcore_exception(self, mock_reddit_cls):
+    def test_catches_prawcore_exception(
+        self, mock_reddit_cls, mock_load_cache, mock_save_cache
+    ):
         """Test that prawcore exceptions are caught and don't crash."""
         import prawcore
         import live_updater
 
-        live_updater._last_body.clear()
+        mock_load_cache.return_value = {}
 
         mock_reddit_cls.return_value.submission.side_effect = (
             prawcore.exceptions.ServerError(Mock())
@@ -702,8 +861,75 @@ class TestUpdateRedditPost(unittest.TestCase):
 
         result = live_updater.update_reddit_post("test_123", "body")
         self.assertFalse(result)
+        mock_save_cache.assert_not_called()
 
-        live_updater._last_body.clear()
+    @patch("live_updater.save_cache")
+    @patch("live_updater.load_cache")
+    @patch("live_updater.praw.Reddit")
+    def test_body_hash_persisted_after_edit(
+        self, mock_reddit_cls, mock_load_cache, mock_save_cache
+    ):
+        """Test that body hash is persisted after a successful edit."""
+        import live_updater
+
+        cache_data = {}
+        mock_load_cache.return_value = cache_data
+
+        post_id = "hash_persist_123"
+        body = "Body to hash"
+        expected_hash = hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+        result = live_updater.update_reddit_post(post_id, body)
+
+        self.assertTrue(result)
+        self.assertEqual(cache_data["_body_hashes"][post_id], expected_hash)
+        self.assertEqual(live_updater._last_body[post_id], expected_hash)
+        mock_reddit_cls.return_value.submission.return_value.edit.assert_called_once_with(body)
+        mock_save_cache.assert_called_once_with(cache_data)
+
+    @patch("live_updater.save_cache")
+    @patch("live_updater.load_cache")
+    @patch("live_updater.praw.Reddit")
+    def test_skips_edit_when_persisted_hash_matches(
+        self, mock_reddit_cls, mock_load_cache, mock_save_cache
+    ):
+        """Test cross-run dedup skips edit when persisted hash is unchanged."""
+        import live_updater
+
+        post_id = "persisted_match_123"
+        body = "Same body across runs"
+        persisted_hash = hashlib.sha256(body.encode("utf-8")).hexdigest()
+        mock_load_cache.return_value = {"_body_hashes": {post_id: persisted_hash}}
+
+        result = live_updater.update_reddit_post(post_id, body)
+
+        self.assertTrue(result)
+        mock_reddit_cls.assert_not_called()
+        mock_save_cache.assert_not_called()
+        self.assertEqual(live_updater._last_body[post_id], persisted_hash)
+
+    @patch("live_updater.save_cache")
+    @patch("live_updater.load_cache")
+    @patch("live_updater.praw.Reddit")
+    def test_edits_when_persisted_hash_differs(
+        self, mock_reddit_cls, mock_load_cache, mock_save_cache
+    ):
+        """Test edit still occurs when persisted hash differs from new body."""
+        import live_updater
+
+        post_id = "persisted_diff_123"
+        body = "Updated body text"
+        expected_hash = hashlib.sha256(body.encode("utf-8")).hexdigest()
+        cache_data = {"_body_hashes": {post_id: "old_hash"}}
+        mock_load_cache.return_value = cache_data
+
+        result = live_updater.update_reddit_post(post_id, body)
+
+        self.assertTrue(result)
+        mock_reddit_cls.return_value.submission.return_value.edit.assert_called_once_with(body)
+        self.assertEqual(cache_data["_body_hashes"][post_id], expected_hash)
+        self.assertEqual(live_updater._last_body[post_id], expected_hash)
+        mock_save_cache.assert_called_once_with(cache_data)
 
 
 class TestLOIPremierRound1Simulation(unittest.TestCase):
