@@ -265,7 +265,7 @@ def build_premier_body(matches_data, league_table):
         date = get_fixture_dublin_date(match)
         matches_by_date.setdefault(date, []).append(match)
 
-    body = "*Live scores will be updated during matches*\n\n"
+    body = "*Live scores and league table will be updated during matches*\n\n"
 
     for date, matches_list in sorted(matches_by_date.items()):
         body += _format_match_date_section(date, matches_list)
@@ -314,7 +314,7 @@ def build_first_body(matches_data, league_table):
         date = get_fixture_dublin_date(match)
         matches_by_date.setdefault(date, []).append(match)
 
-    body = "*Live scores will be updated during matches*\n\n"
+    body = "*Live scores and league table will be updated during matches*\n\n"
 
     for date, matches_list in sorted(matches_by_date.items()):
         body += _format_match_date_section(date, matches_list)
@@ -364,7 +364,7 @@ def build_cup_body(matches_data, current_round):
         matches_by_date.setdefault(date, []).append(match)
 
     body = (
-        f"*Live scores will be updated during matches*\n\n"
+        f"*Live scores and league table will be updated during matches*\n\n"
         f"## {current_round}\n\n"
     )
 

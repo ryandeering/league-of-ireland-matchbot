@@ -99,7 +99,7 @@ def build_post_body(matches_data, league_table):
         date = get_fixture_dublin_date(match)
         matches_by_date.setdefault(date, []).append(match)
 
-    body = "*Live scores will be updated during matches*\n\n"
+    body = "*Live scores and league table will be updated during matches*\n\n"
 
     for date, matches_list in sorted(matches_by_date.items()):
         date_extracted = datetime.strptime(date, "%Y-%m-%d")
