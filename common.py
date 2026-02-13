@@ -31,7 +31,7 @@ league_grounds = {
     "Shelbourne": "Tolka Park",
     "Sligo Rovers": "The Showgrounds",
     "St. Patrick's Athletic": "Richmond Park",
-    "Waterford": "Waterford Regional Sports Centre",
+    "Waterford": "Waterford RSC",
     # First Division
     "Athlone Town": "Athlone Town Stadium",
     "Bray Wanderers": "Carlisle Grounds",
