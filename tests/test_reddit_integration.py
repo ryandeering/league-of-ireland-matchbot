@@ -340,7 +340,7 @@ class TestDryRun(unittest.TestCase):
         print("---")
 
         # Verify structure
-        self.assertIn("Live scores will be updated", body)
+        self.assertIn("Live scores and league table will be updated", body)
         self.assertIn("Shamrock Rovers", body)
         self.assertIn("2-1", body)
         self.assertIn("Welcome to the discussion thread", body)
