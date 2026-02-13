@@ -157,6 +157,38 @@ class TestLiveMatch(unittest.TestCase):
         self.assertEqual(events[2]["player"]["name"], "Graham Burke")
         self.assertEqual(events[2]["time"]["elapsed"], 62)
 
+    def test_penalty_via_goal_description_key(self):
+        """Penalty detected via goalDescriptionKey when isPenalty is None."""
+        details = {
+            "header": {
+                "teams": [
+                    {"name": "Derry City", "id": "8338"},
+                    {"name": "Dundalk", "id": "8341"},
+                ]
+            },
+            "content": {
+                "matchFacts": {
+                    "events": {
+                        "events": [
+                            {
+                                "type": "Goal",
+                                "time": 90,
+                                "isHome": True,
+                                "nameStr": "Michael Duffy",
+                                "ownGoal": None,
+                                "isPenalty": None,
+                                "goalDescriptionKey": "penalty",
+                            }
+                        ]
+                    }
+                }
+            },
+        }
+        events = convert_match_events(details)
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["detail"], "Penalty")
+        self.assertEqual(events[0]["player"]["name"], "Michael Duffy")
+
 
 class TestMatchStatuses(unittest.TestCase):
     """Test different match status scenarios."""

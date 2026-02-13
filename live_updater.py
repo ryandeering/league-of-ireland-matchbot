@@ -54,6 +54,9 @@ _table_cache: dict[int, dict[str, Any]] = {}
 # Per-run cache for matchDetails scores (fixture_id -> (home, away))
 _score_cache: dict[int, tuple[int, int]] = {}
 
+# Per-run cache for match events/scorers (fixture_id -> events list)
+_events_cache: dict[int, list[dict[str, Any]]] = {}
+
 # Per-run cache of last posted body hash per post_id
 _last_body: dict[str, str] = {}
 
@@ -144,6 +147,8 @@ def get_live_fixtures(league_ids: list[int]) -> list[dict[str, Any]]:
                 if match_id:
                     events, venue, scores = _fetch_match_details(match_id)
                     converted["events"] = events
+                    if events:
+                        _events_cache[converted["fixture"]["id"]] = events
                     if venue:
                         converted["fixture"]["venue"]["name"] = venue
                     home_score, away_score = scores
@@ -485,6 +490,36 @@ def _enrich_fixture_scores(fixture: dict[str, Any]) -> None:
             _score_cache[fixture_id] = (home_score, away_score)
 
 
+def _enrich_fixture_events(fixture: dict[str, Any]) -> None:
+    """Fill in missing events from cache or matchDetails for finished fixtures.
+
+    Uses the per-run _events_cache to preserve scorers after matches end.
+    """
+    if fixture.get("events"):
+        return  # Already has events
+
+    status_short = fixture.get("fixture", {}).get("status", {}).get("short", "NS")
+    if status_short in ("TBD", "NS"):
+        return  # Pre-match, no events expected
+
+    fixture_id = fixture.get("fixture", {}).get("id")
+    if not fixture_id:
+        return
+
+    # Check per-run cache first
+    if fixture_id in _events_cache:
+        fixture["events"] = _events_cache[fixture_id]
+        return
+
+    # Fetch from matchDetails for finished matches
+    details = client.get_match_details(fixture_id)
+    if details:
+        events = convert_match_events(details)
+        if events:
+            fixture["events"] = events
+            _events_cache[fixture_id] = events
+
+
 def _get_weekly_fixtures_with_live_scores(
         league_id: int,
         match_dates: list[str],
@@ -530,9 +565,10 @@ def _get_weekly_fixtures_with_live_scores(
             )
             merged.append(live_fixture)
 
-    # Enrich fixtures that have null scores from matchDetails
+    # Enrich fixtures that have null scores or missing events
     for fixture in merged:
         _enrich_fixture_scores(fixture)
+        _enrich_fixture_events(fixture)
 
     return merged
 

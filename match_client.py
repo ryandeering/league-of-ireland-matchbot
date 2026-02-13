@@ -480,7 +480,8 @@ def convert_match_events(match_details: dict[str, Any]) -> list[dict[str, Any]]:
             detail = "Normal Goal"
             if event.get("ownGoal"):
                 detail = "Own Goal"
-            elif event.get("isPenalty"):
+            elif (event.get("isPenalty")
+                  or event.get("goalDescriptionKey") == "penalty"):
                 detail = "Penalty"
 
             events.append({
