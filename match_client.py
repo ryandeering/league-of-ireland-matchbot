@@ -319,6 +319,24 @@ def convert_raw_match(raw_match: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _parse_scores_str(scores_str: str) -> tuple[int, int]:
+    """Parse a 'GF-GA' string into separate goal counts.
+
+    Args:
+        scores_str: Score string from API (e.g. "10-4")
+
+    Returns:
+        Tuple of (goals_for, goals_against), defaults to (0, 0)
+    """
+    if scores_str and "-" in scores_str:
+        parts = scores_str.split("-")
+        try:
+            return int(parts[0]), int(parts[1])
+        except (ValueError, IndexError):
+            pass
+    return 0, 0
+
+
 def convert_raw_table(raw_table: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Convert raw table format to api-football compatible format.
 
@@ -331,6 +349,8 @@ def convert_raw_table(raw_table: list[dict[str, Any]]) -> list[dict[str, Any]]:
     converted = []
 
     for row in raw_table:
+        goals_for, goals_against = _parse_scores_str(row.get("scoresStr", ""))
+
         converted.append({
             "rank": row.get("idx", 0),
             "team": {
@@ -343,8 +363,8 @@ def convert_raw_table(raw_table: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "draw": row.get("draws", 0),
                 "lose": row.get("losses", 0),
                 "goals": {
-                    "for": row.get("scoresFor", 0),
-                    "against": row.get("scoresAgainst", 0),
+                    "for": goals_for,
+                    "against": goals_against,
                 },
             },
             "goalsDiff": row.get("goalConDiff", 0),

@@ -258,9 +258,9 @@ def format_scorers_compact(fixture: Dict[str, Any]) -> str:
         for s in scorer_list:
             name = s["name"]
             if s["own_goal"]:
-                minute_str = f"OG{s['minute']}'"
+                minute_str = f"OG {s['minute']}'"
             elif s["penalty"]:
-                minute_str = f"P{s['minute']}'"
+                minute_str = f"P {s['minute']}'"
             else:
                 minute_str = f"{s['minute']}'"
 

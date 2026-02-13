@@ -238,8 +238,7 @@ class TestLeagueTable(unittest.TestCase):
                 "wins": 15,
                 "draws": 3,
                 "losses": 2,
-                "scoresFor": 45,
-                "scoresAgainst": 15,
+                "scoresStr": "45-15",
                 "goalConDiff": 30,
                 "pts": 48
             },
@@ -251,8 +250,7 @@ class TestLeagueTable(unittest.TestCase):
                 "wins": 14,
                 "draws": 4,
                 "losses": 2,
-                "scoresFor": 40,
-                "scoresAgainst": 18,
+                "scoresStr": "40-18",
                 "goalConDiff": 22,
                 "pts": 46
             },
@@ -264,8 +262,7 @@ class TestLeagueTable(unittest.TestCase):
                 "wins": 12,
                 "draws": 5,
                 "losses": 3,
-                "scoresFor": 35,
-                "scoresAgainst": 20,
+                "scoresStr": "35-20",
                 "goalConDiff": 15,
                 "pts": 41
             }
@@ -294,6 +291,42 @@ class TestLeagueTable(unittest.TestCase):
         """Test converting empty table."""
         converted = convert_raw_table([])
         self.assertEqual(converted, [])
+
+    def test_scores_str_parsing(self):
+        """Test that scoresStr is correctly parsed into GF and GA."""
+        table = [{"idx": 1, "id": 1, "name": "Team", "played": 5,
+                  "wins": 3, "draws": 1, "losses": 1,
+                  "scoresStr": "10-4", "goalConDiff": 6, "pts": 10}]
+        converted = convert_raw_table(table)
+        self.assertEqual(converted[0]["all"]["goals"]["for"], 10)
+        self.assertEqual(converted[0]["all"]["goals"]["against"], 4)
+
+    def test_missing_scores_str_defaults_to_zero(self):
+        """Row with no scoresStr should default GF/GA to 0."""
+        table = [{"idx": 1, "id": 1, "name": "Team", "played": 0,
+                  "wins": 0, "draws": 0, "losses": 0,
+                  "goalConDiff": 0, "pts": 0}]
+        converted = convert_raw_table(table)
+        self.assertEqual(converted[0]["all"]["goals"]["for"], 0)
+        self.assertEqual(converted[0]["all"]["goals"]["against"], 0)
+
+    def test_zero_zero_scores_str(self):
+        """scoresStr '0-0' should parse to GF=0, GA=0."""
+        table = [{"idx": 1, "id": 1, "name": "Team", "played": 1,
+                  "wins": 0, "draws": 1, "losses": 0,
+                  "scoresStr": "0-0", "goalConDiff": 0, "pts": 1}]
+        converted = convert_raw_table(table)
+        self.assertEqual(converted[0]["all"]["goals"]["for"], 0)
+        self.assertEqual(converted[0]["all"]["goals"]["against"], 0)
+
+    def test_high_scoring_scores_str(self):
+        """scoresStr with double-digit values should parse correctly."""
+        table = [{"idx": 1, "id": 1, "name": "Team", "played": 20,
+                  "wins": 15, "draws": 3, "losses": 2,
+                  "scoresStr": "45-15", "goalConDiff": 30, "pts": 48}]
+        converted = convert_raw_table(table)
+        self.assertEqual(converted[0]["all"]["goals"]["for"], 45)
+        self.assertEqual(converted[0]["all"]["goals"]["against"], 15)
 
 
 class TestMatchDataClientIntegration(unittest.TestCase):

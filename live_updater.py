@@ -160,7 +160,7 @@ def get_live_fixtures(league_ids: list[int]) -> list[dict[str, Any]]:
         except requests.exceptions.RequestException as exc:
             logger.error("Error fetching fixtures for league %s: %s", league_id, exc)
 
-    return all_fixtures
+    return apply_fallback_grounds(all_fixtures)
 
 
 def get_league_fixtures(league_id: int) -> list[dict[str, Any]]:
