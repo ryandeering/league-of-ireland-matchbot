@@ -16,6 +16,8 @@ normalised_team_names = {
     "Wexford FC": "Wexford FC",
     "Cork City": "Cork City FC",
     "Cork City FC": "Cork City FC",
+    "Kerry": "Kerry FC",
+    "Kerry FC": "Kerry FC",
 }
 
 league_grounds = {
@@ -36,7 +38,7 @@ league_grounds = {
     "Cobh Ramblers": "St. Colman's Park",
     "Cork City FC": "Turners Cross",
     "Finn Harps": "Finn Park",
-    "Kerry": "Mounthawk Park",
+    "Kerry FC": "Mounthawk Park",
     "Longford Town": "Bishopsgate",
     "Treaty United": "Markets Field",
     "UCD": "UCD Bowl",
