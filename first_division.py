@@ -22,6 +22,8 @@ from common import (
     save_cache,
     filter_weekly_matches,
     get_match_date_range,
+    format_date_range,
+    apply_fallback_grounds,
     get_fixture_dublin_date,
 )
 from match_client import (
@@ -54,7 +56,8 @@ def get_matches_for_league():
             if fixture_id not in fixtures_by_id or tab == "results":
                 fixtures_by_id[fixture_id] = converted
 
-    return enrich_fixtures_with_venues(client, list(fixtures_by_id.values()))
+    fixtures = enrich_fixtures_with_venues(client, list(fixtures_by_id.values()))
+    return apply_fallback_grounds(fixtures)
 
 
 def get_league_table():
@@ -170,7 +173,7 @@ def main():
 
         title = (
             f"LOI First Division - Fixtures / "
-            f"{first_match_date.strftime('%d-%m-%Y')} to {last_match_date.strftime('%d-%m-%Y')}"
+            f"{format_date_range(first_match_date, last_match_date)}"
         )
 
         league_table = get_league_table()

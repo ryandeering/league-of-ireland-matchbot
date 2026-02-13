@@ -26,6 +26,7 @@ from common import (
     load_cache,
     save_cache,
     get_fixture_dublin_date,
+    apply_fallback_grounds,
 )
 from match_client import (
     MatchDataClient,
@@ -192,7 +193,7 @@ def get_league_fixtures(league_id: int) -> list[dict[str, Any]]:
     except requests.exceptions.RequestException as exc:
         logger.error("Error fetching fixtures for league %s: %s", league_id, exc)
 
-    return list(fixtures_by_id.values())
+    return apply_fallback_grounds(list(fixtures_by_id.values()))
 
 
 def get_league_table(league_id: int) -> list[dict[str, Any]]:

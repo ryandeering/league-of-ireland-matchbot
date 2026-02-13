@@ -367,7 +367,9 @@ def extract_venue_from_details(match_details: dict[str, Any]) -> str:
     content = match_details.get("content", {})
     match_facts = content.get("matchFacts", {})
     info_box = match_facts.get("infoBox", {})
-    stadium = info_box.get("Stadium", {})
+    stadium = info_box.get("Stadium")
+    if not stadium:
+        return ""
     return stadium.get("name", "")
 
 

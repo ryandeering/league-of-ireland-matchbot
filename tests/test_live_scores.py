@@ -7,6 +7,7 @@ from common import (
     parse_match_datetime,
     get_fixture_dublin_date,
     filter_weekly_matches,
+    apply_fallback_grounds,
 )
 
 
@@ -39,7 +40,7 @@ class TestMatchStatusDisplay(unittest.TestCase):
         fixture = self.base_fixture.copy()
         score, status = get_match_status_display(fixture)
         self.assertEqual(score, "vs")
-        self.assertTrue(len(status) > 0)  # Status should be non-empty
+        self.assertEqual(status, "-")
 
     def test_pre_match_tbd(self):
         """Test TBD match status."""
@@ -331,6 +332,90 @@ class TestNullScoreHandling(unittest.TestCase):
         }
         score, _ = get_match_status_display(fixture)
         self.assertEqual(score, "0-0")
+
+
+class TestCancelledMatchDisplay(unittest.TestCase):
+    """Regression tests: cancelled matches must not show a score."""
+
+    def _make_cancelled_fixture(self, home_score=None, away_score=None):
+        return {
+            "fixture": {
+                "status": {"short": "CANC", "elapsed": None},
+                "date": "2026-02-13T19:45:00+00:00",
+                "venue": {"name": "Richmond Park"},
+            },
+            "goals": {"home": home_score, "away": away_score},
+            "teams": {
+                "home": {"name": "St Patrick's Athl.", "id": 1},
+                "away": {"name": "Galway United FC", "id": 2},
+            },
+        }
+
+    def test_cancelled_with_null_scores_shows_dash(self):
+        """Cancelled match with null scores should show '-'."""
+        fixture = self._make_cancelled_fixture(None, None)
+        score, status = get_match_status_display(fixture)
+        self.assertEqual(score, "-")
+        self.assertEqual(status, "Cancelled")
+
+    def test_cancelled_with_zero_scores_shows_dash_not_0_0(self):
+        """Cancelled match with 0-0 from API should show '-', not '0-0'."""
+        fixture = self._make_cancelled_fixture(0, 0)
+        score, status = get_match_status_display(fixture)
+        self.assertEqual(score, "-")
+        self.assertNotEqual(score, "0-0")
+        self.assertEqual(status, "Cancelled")
+
+    def test_cancelled_format_live_fixture(self):
+        """Cancelled match should show '-' and 'Cancelled' in formatted output."""
+        fixture = self._make_cancelled_fixture(0, 0)
+        formatted = format_live_fixture(fixture)
+        self.assertEqual(formatted[1], "-")        # Score column
+        self.assertEqual(formatted[4], "Cancelled") # Status column
+
+
+class TestFallbackGrounds(unittest.TestCase):
+    """Regression tests: missing venues must be filled from league_grounds."""
+
+    def test_tbd_venue_replaced_by_fallback(self):
+        """Fixture with TBD venue should get home team's ground."""
+        fixtures = [{
+            "fixture": {"venue": {"name": "TBD"}},
+            "teams": {"home": {"name": "Derry City"}},
+        }]
+        result = apply_fallback_grounds(fixtures)
+        self.assertEqual(result[0]["fixture"]["venue"]["name"],
+                         "Brandywell Stadium")
+
+    def test_empty_venue_replaced_by_fallback(self):
+        """Fixture with empty venue should get home team's ground."""
+        fixtures = [{
+            "fixture": {"venue": {"name": ""}},
+            "teams": {"home": {"name": "Shamrock Rovers"}},
+        }]
+        result = apply_fallback_grounds(fixtures)
+        self.assertEqual(result[0]["fixture"]["venue"]["name"],
+                         "Tallaght Stadium")
+
+    def test_api_venue_not_overwritten(self):
+        """Fixture with a real venue from the API should not be overwritten."""
+        fixtures = [{
+            "fixture": {"venue": {"name": "Eamonn Deacy Park"}},
+            "teams": {"home": {"name": "Galway United"}},
+        }]
+        result = apply_fallback_grounds(fixtures)
+        self.assertEqual(result[0]["fixture"]["venue"]["name"],
+                         "Eamonn Deacy Park")
+
+    def test_normalised_name_lookup(self):
+        """Abbreviated API team names should still resolve via normalisation."""
+        fixtures = [{
+            "fixture": {"venue": {"name": "TBD"}},
+            "teams": {"home": {"name": "St Patrick's Athl."}},
+        }]
+        result = apply_fallback_grounds(fixtures)
+        self.assertEqual(result[0]["fixture"]["venue"]["name"],
+                         "Richmond Park")
 
 
 class TestDSTTransitions(unittest.TestCase):

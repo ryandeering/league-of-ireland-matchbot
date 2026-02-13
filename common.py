@@ -10,6 +10,37 @@ from typing import Dict, List, Tuple, Any
 
 normalised_team_names = {
     "St Patrick's Athl.": "St. Patrick's Athletic",
+    "Bohemian": "Bohemian FC",
+    "Bohemian FC": "Bohemian FC",
+    "Wexford": "Wexford FC",
+    "Wexford FC": "Wexford FC",
+    "Cork City": "Cork City FC",
+    "Cork City FC": "Cork City FC",
+}
+
+league_grounds = {
+    # Premier Division
+    "Bohemian FC": "Dalymount Park",
+    "Derry City": "Brandywell Stadium",
+    "Drogheda United": "United Park",
+    "Dundalk": "Oriel Park",
+    "Galway United": "Eamonn Deacy Park",
+    "Shamrock Rovers": "Tallaght Stadium",
+    "Shelbourne": "Tolka Park",
+    "Sligo Rovers": "The Showgrounds",
+    "St. Patrick's Athletic": "Richmond Park",
+    "Waterford": "Waterford Regional Sports Centre",
+    # First Division
+    "Athlone Town": "Athlone Town Stadium",
+    "Bray Wanderers": "Carlisle Grounds",
+    "Cobh Ramblers": "St. Colman's Park",
+    "Cork City FC": "Turners Cross",
+    "Finn Harps": "Finn Park",
+    "Kerry": "Mounthawk Park",
+    "Longford Town": "Bishopsgate",
+    "Treaty United": "Markets Field",
+    "UCD": "UCD Bowl",
+    "Wexford FC": "Ferrycarrig Park",
 }
 
 match_table_headers = ["Home Team", "Score", "Away Team", "Ground", "Status", "Kickoff", "Scorers"]
@@ -36,17 +67,39 @@ CACHE_FILE = "match_cache.json"
 def normalise_team_name(team_name: str) -> str:
     """Normalise team name.
 
+    Explicit mappings take priority, otherwise FC suffix is stripped.
+
     Args:
         team_name: Team name from API
 
     Returns:
-        Normalized team name with FC suffix removed
+        Normalized team name
     """
-    name = normalised_team_names.get(team_name, team_name)
-    # Remove FC suffix from all team names
-    if name.endswith(" FC"):
-        name = name[:-3]
-    return name
+    if team_name in normalised_team_names:
+        return normalised_team_names[team_name]
+    if team_name.endswith(" FC"):
+        return team_name[:-3]
+    return team_name
+
+
+def apply_fallback_grounds(fixtures):
+    """Fill in missing venue names from hardcoded grounds lookup.
+
+    Args:
+        fixtures: List of fixtures in api-football format
+
+    Returns:
+        Same fixtures with missing venues populated from league_grounds
+    """
+    for fixture in fixtures:
+        venue = fixture.get("fixture", {}).get("venue", {}).get("name", "")
+        if not venue or venue == "TBD":
+            home_team = normalise_team_name(
+                fixture.get("teams", {}).get("home", {}).get("name", ""))
+            ground = league_grounds.get(home_team, "")
+            if ground:
+                fixture["fixture"]["venue"]["name"] = ground
+    return fixtures
 
 
 def ordinal_suffix(day: int) -> str:
@@ -145,15 +198,13 @@ def get_match_status_display(fixture: Dict[str, Any]) -> Tuple[str, str]:
     home_score = fixture.get("goals", {}).get("home")
     away_score = fixture.get("goals", {}).get("away")
 
-    fixture_date = fixture.get("fixture", {}).get("date")
-    if fixture_date:
-        kickoff_time = parse_match_datetime(fixture_date).strftime("%H:%M")
-    else:
-        kickoff_time = "TBD"
-
     # Pre-match
     if status in ["TBD", "NS"]:
-        return "vs", kickoff_time
+        return "vs", "-"
+
+    # Cancelled matches - never played, so no score to show
+    if status == "CANC":
+        return "-", "Cancelled"
 
     # For started/finished matches, handle missing scores
     if home_score is not None and away_score is not None:
@@ -172,7 +223,6 @@ def get_match_status_display(fixture: Dict[str, Any]) -> Tuple[str, str]:
         "AET": "AET",
         "PEN": "Pens",
         "LIVE": f"{elapsed}'" if elapsed else "LIVE",
-        "CANC": "CANC",
     }
 
     if status in status_map:
@@ -367,3 +417,13 @@ def get_match_date_range(matches):
         for m in matches
     )
     return first_date, last_date
+
+
+def format_date_range(first_date, last_date):
+    """Format date range for post title.
+
+    Shows single date if start == end, otherwise shows range.
+    """
+    if first_date == last_date:
+        return first_date.strftime('%d-%m-%Y')
+    return f"{first_date.strftime('%d-%m-%Y')} to {last_date.strftime('%d-%m-%Y')}"
