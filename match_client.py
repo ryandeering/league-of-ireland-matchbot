@@ -3,6 +3,7 @@
 This client fetches match data from external football data APIs.
 """
 
+import json
 import logging
 import re
 import time
@@ -93,19 +94,85 @@ class MatchDataClient:
             logger.error("Error fetching league %s matches: %s", league_id, exc)
             return {}
 
-    def get_match_details(self, match_id: int) -> dict[str, Any]:
+    def get_match_details(
+        self, match_id: int, page_url: str = ""
+    ) -> dict[str, Any]:
         """Fetch detailed information for a specific match.
+
+        Tries the page-based approach first (fetching the match page HTML
+        and extracting __NEXT_DATA__), falling back to the direct API
+        endpoint.
 
         Args:
             match_id: Match ID
+            page_url: Optional page URL slug from the leagues endpoint
+                (e.g. "/matches/team-vs-team/abc123#12345")
 
         Returns:
             Match details including events, lineups, stats
         """
+        if page_url:
+            details = self._get_match_details_from_page(page_url)
+            if details:
+                return details
+
         try:
             return self._get("/matchDetails", params={"matchId": match_id})
         except requests.exceptions.RequestException as exc:
             logger.error("Error fetching match %s details: %s", match_id, exc)
+            return {}
+
+    def _get_match_details_from_page(
+        self, page_url: str
+    ) -> dict[str, Any]:
+        """Extract match details from the rendered match page.
+
+        FotMob embeds the full match data as JSON inside a __NEXT_DATA__
+        script tag. This avoids the Cloudflare-protected /api/matchDetails
+        endpoint.
+
+        Args:
+            page_url: Page URL slug (e.g. "/matches/team-vs-team/abc123#12345")
+
+        Returns:
+            Match details dict (same structure as /api/matchDetails), or {}
+        """
+        # Strip the #matchID fragment
+        slug = page_url.split("#")[0]
+        url = f"https://www.fotmob.com{slug}"
+
+        self._rate_limit()
+        try:
+            response = requests.get(
+                url,
+                headers={
+                    "User-Agent": _DEFAULT_USER_AGENT,
+                    "Accept": (
+                        "text/html,application/xhtml+xml,"
+                        "application/xml;q=0.9,*/*;q=0.8"
+                    ),
+                },
+                timeout=REQUEST_TIMEOUT,
+            )
+            response.raise_for_status()
+        except requests.exceptions.RequestException as exc:
+            logger.warning("Page fetch failed for %s: %s", slug, exc)
+            return {}
+
+        html = response.text
+        marker = "__NEXT_DATA__"
+        marker_idx = html.find(marker)
+        if marker_idx < 0:
+            logger.warning("No __NEXT_DATA__ found on %s", slug)
+            return {}
+
+        try:
+            start = html.find(">", marker_idx) + 1
+            end = html.find("</script>", start)
+            data = json.loads(html[start:end])
+            return data.get("props", {}).get("pageProps", {})
+        except (json.JSONDecodeError, ValueError) as exc:
+            logger.warning("Failed to parse __NEXT_DATA__ from %s: %s", slug, exc)
             return {}
 
     def get_all_matches(self, league_id: int) -> list[dict[str, Any]]:
@@ -163,12 +230,22 @@ class MatchDataClient:
             data = self._get("/leagues", params={"id": league_id})
             table_data = data.get("table", [])
             if table_data:
-                return (
-                    table_data[0]
+                first = table_data[0]
+                rows = (
+                    first
                     .get("data", {})
                     .get("table", {})
                     .get("all", [])
                 )
+                team_form = first.get("teamForm", {})
+                for row in rows:
+                    team_id = str(row.get("id", ""))
+                    form_entries = team_form.get(team_id, [])
+                    row["_form"] = "".join(
+                        e.get("resultString", "")
+                        for e in form_entries
+                    )
+                return rows
             return []
         except requests.exceptions.RequestException as exc:
             logger.error("Error fetching league %s table: %s", league_id, exc)
@@ -281,6 +358,16 @@ def convert_raw_match(raw_match: dict[str, Any]) -> dict[str, Any]:
     home_score = score.get("home")
     away_score = score.get("away")
 
+    # Fallback: parse "2 - 1" style scoreStr for finished matches
+    if home_score is None and status.get("scoreStr"):
+        parts = status["scoreStr"].split(" - ")
+        if len(parts) == 2:
+            try:
+                home_score = int(parts[0])
+                away_score = int(parts[1])
+            except ValueError:
+                pass
+
     home_data = raw_match.get("home", {})
     away_data = raw_match.get("away", {})
 
@@ -316,6 +403,7 @@ def convert_raw_match(raw_match: dict[str, Any]) -> dict[str, Any]:
         },
         "events": [],
         "_source_id": raw_match.get("id"),
+        "_page_url": raw_match.get("pageUrl", ""),
     }
 
 
@@ -369,7 +457,7 @@ def convert_raw_table(raw_table: list[dict[str, Any]]) -> list[dict[str, Any]]:
             },
             "goalsDiff": row.get("goalConDiff", 0),
             "points": row.get("pts", 0),
-            "form": "",
+            "form": row.get("_form", ""),
         })
 
     return converted

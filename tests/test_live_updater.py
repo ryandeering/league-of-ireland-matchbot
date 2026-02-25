@@ -174,6 +174,7 @@ class TestLiveUpdaterIntegration(unittest.TestCase):
         main()
         mock_get_fixtures.assert_not_called()
 
+    @patch("live_updater._cleanup_finished_match_day")
     @patch("live_updater.update_reddit_post")
     @patch("live_updater.get_league_table")
     @patch("live_updater.get_live_fixtures")
@@ -184,6 +185,7 @@ class TestLiveUpdaterIntegration(unittest.TestCase):
         mock_get_fixtures,
         mock_get_table,
         mock_update_post,
+        _mock_cleanup,
     ):
         """Test updating Premier Division thread."""
         today = date.today().isoformat()
@@ -344,9 +346,11 @@ class TestCleanupFinishedMatchDay(unittest.TestCase):
 
         _cleanup_finished_match_day(cache, today, {"premier_division": 126})
 
-        # Should have removed today from match_dates
-        self.assertNotIn(today_str, cache["premier_division"]["match_dates"])
+        # match_dates should be unchanged (post body still needs all dates)
+        self.assertIn(today_str, cache["premier_division"]["match_dates"])
         self.assertIn("2026-02-07", cache["premier_division"]["match_dates"])
+        # today should be marked as completed (stops further polling)
+        self.assertIn(today_str, cache["premier_division"]["completed_dates"])
         mock_save_cache.assert_called_once()
 
     @patch("live_updater.save_cache")
@@ -380,8 +384,9 @@ class TestCleanupFinishedMatchDay(unittest.TestCase):
 
         _cleanup_finished_match_day(cache, today, {"premier_division": 126})
 
-        # Should NOT have removed today
+        # Should NOT have marked today as completed
         self.assertIn(today_str, cache["premier_division"]["match_dates"])
+        self.assertNotIn("completed_dates", cache["premier_division"])
         mock_save_cache.assert_not_called()
 
     @patch("live_updater.save_cache")
@@ -422,8 +427,9 @@ class TestCleanupFinishedMatchDay(unittest.TestCase):
 
         _cleanup_finished_match_day(cache, today, {"premier_division": 126})
 
-        # Should NOT have removed today
+        # Should NOT have marked today as completed
         self.assertIn(today_str, cache["premier_division"]["match_dates"])
+        self.assertNotIn("completed_dates", cache["premier_division"])
         mock_save_cache.assert_not_called()
 
     @patch("live_updater.save_cache")
@@ -468,8 +474,9 @@ class TestCleanupFinishedMatchDay(unittest.TestCase):
 
         _cleanup_finished_match_day(cache, today, {"premier_division": 126})
 
-        # Should NOT have removed today - NS match still pending
+        # Should NOT have marked today as completed - NS match still pending
         self.assertIn(today_str, cache["premier_division"]["match_dates"])
+        self.assertNotIn("completed_dates", cache["premier_division"])
         mock_save_cache.assert_not_called()
 
     @patch("live_updater.get_league_fixtures")
@@ -519,8 +526,11 @@ class TestCleanupFinishedMatchDay(unittest.TestCase):
 
         _cleanup_finished_match_day(cache, today, {"premier_division": 126})
 
-        self.assertNotIn(today_str, cache["premier_division"]["match_dates"])
+        # Premier should be marked completed, FAI Cup untouched
+        self.assertIn(today_str, cache["premier_division"]["match_dates"])
+        self.assertIn(today_str, cache["premier_division"]["completed_dates"])
         self.assertIn(today_str, cache["fai_cup"]["match_dates"])
+        self.assertNotIn("completed_dates", cache["fai_cup"])
         mock_get_fixtures.assert_called_once_with(126)
         mock_save_cache.assert_called_once()
 
@@ -565,8 +575,11 @@ class TestCleanupFinishedMatchDay(unittest.TestCase):
             {"premier_division": 126, "first_division": 218},
         )
 
-        self.assertNotIn(today_str, cache["premier_division"]["match_dates"])
+        # Premier completed (all FT), First Division still active (NS)
+        self.assertIn(today_str, cache["premier_division"]["match_dates"])
+        self.assertIn(today_str, cache["premier_division"]["completed_dates"])
         self.assertIn(today_str, cache["first_division"]["match_dates"])
+        self.assertNotIn("completed_dates", cache["first_division"])
         mock_save_cache.assert_called_once()
 
 
@@ -714,6 +727,7 @@ class TestLiveUpdaterErrorHandling(unittest.TestCase):
         self.assertEqual(cleanup_args[1].isoformat(), today)
         self.assertEqual(cleanup_args[2], {"premier_division": 126})
 
+    @patch("live_updater._cleanup_finished_match_day")
     @patch("live_updater.update_league_thread")
     @patch("live_updater.load_cache")
     @patch("live_updater.get_live_fixtures")
@@ -722,6 +736,7 @@ class TestLiveUpdaterErrorHandling(unittest.TestCase):
         mock_get_fixtures,
         mock_load_cache,
         mock_update_league_thread,
+        _mock_cleanup,
     ):
         """Test all competitions with matches today are updated each cycle."""
         today = date.today().isoformat()
@@ -771,6 +786,7 @@ class TestLiveUpdaterErrorHandling(unittest.TestCase):
         self.assertEqual(len(calls_by_competition["premier_division"][2]), 1)
         self.assertEqual(calls_by_competition["first_division"][2], [])
 
+    @patch("live_updater._cleanup_finished_match_day")
     @patch("live_updater.update_reddit_post")
     @patch("live_updater.get_league_table")
     @patch("live_updater.get_live_fixtures")
@@ -781,6 +797,7 @@ class TestLiveUpdaterErrorHandling(unittest.TestCase):
         mock_get_fixtures,
         mock_get_table,
         mock_update_post,
+        _mock_cleanup,
     ):
         """Test updater continues if one post update fails."""
         today = date.today().isoformat()
@@ -1252,6 +1269,7 @@ class TestLOIPremierRound1Simulation(unittest.TestCase):
         self.assertEqual(converted["events"][1]["detail"], "Penalty")
         self.assertEqual(converted["events"][2]["time"]["elapsed"], 58)
 
+    @patch("live_updater._cleanup_finished_match_day")
     @patch("live_updater.update_reddit_post")
     @patch("live_updater.get_league_table")
     @patch("live_updater.get_live_fixtures")
@@ -1262,6 +1280,7 @@ class TestLOIPremierRound1Simulation(unittest.TestCase):
         mock_get_fixtures,
         mock_get_table,
         mock_update_post,
+        _mock_cleanup,
     ):
         """Simulate a full Round 1 live update cycle."""
         from match_client import convert_raw_match

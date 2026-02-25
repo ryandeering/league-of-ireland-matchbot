@@ -83,19 +83,45 @@ def _persist_body_hash(post_id: str, body_hash: str) -> None:
         logger.warning("Could not persist body hash for post %s: %s", post_id, exc)
 
 
+def _persist_events(fixture_id: int, events: list[dict[str, Any]]) -> None:
+    """Save match events to file cache so they survive across runs."""
+    try:
+        cache = load_cache()
+        match_events = cache.get("_match_events")
+        if not isinstance(match_events, dict):
+            match_events = {}
+            cache["_match_events"] = match_events
+        match_events[str(fixture_id)] = events
+        save_cache(cache)
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        logger.warning("Could not persist events for fixture %s: %s", fixture_id, exc)
+
+
+def _load_persisted_events(fixture_id: int) -> list[dict[str, Any]]:
+    """Load match events from file cache."""
+    try:
+        cache = load_cache()
+        match_events = cache.get("_match_events", {})
+        return match_events.get(str(fixture_id), [])
+    except Exception:  # pylint: disable=broad-exception-caught
+        return []
+
+
 def _fetch_match_details(
     match_id: str,
+    page_url: str = "",
 ) -> tuple[list[dict[str, Any]], str, tuple[Any, Any]]:
     """Fetch events, venue, and scores for a specific match.
 
     Args:
         match_id: Match ID to fetch details for
+        page_url: Optional page URL slug for page-based fetching
 
     Returns:
         Tuple of (events list, venue name, (home_score, away_score))
     """
     try:
-        details = client.get_match_details(int(match_id))
+        details = client.get_match_details(int(match_id), page_url=page_url)
         if details:
             events = convert_match_events(details)
             venue = extract_venue_from_details(details)
@@ -106,25 +132,21 @@ def _fetch_match_details(
     return [], "", (None, None)
 
 
-def _is_live_match(match: dict[str, Any]) -> bool:
-    """Check if a match is currently live.
-
-    Args:
-        match: Raw match data
-
-    Returns:
-        True if match is live (started but not finished)
+def get_live_fixtures(
+    league_ids: list[int],
+    match_dates: set[str] | None = None,
+) -> list[dict[str, Any]]:
     """
-    status = match.get("status", {})
-    return status.get("started") and not status.get("finished")
+    Fetch live and recently-finished fixtures for multiple leagues.
 
-
-def get_live_fixtures(league_ids: list[int]) -> list[dict[str, Any]]:
-    """
-    Fetch live fixtures for multiple leagues.
+    Live matches are always included. Finished matches are included only
+    when their Dublin-local date falls within *match_dates* so that
+    scorers / events are preserved in the thread after full-time.
 
     Args:
         league_ids: list of league IDs to fetch
+        match_dates: optional set of ISO date strings (Dublin tz) to
+            scope finished-match inclusion
 
     Returns:
         List of fixture dictionaries in api-football compatible format
@@ -137,18 +159,31 @@ def get_live_fixtures(league_ids: list[int]) -> list[dict[str, Any]]:
             matches = client.extract_matches(data)
 
             for match in matches:
-                if not _is_live_match(match):
+                status = match.get("status", {})
+                if not status.get("started"):
                     continue
 
                 match["_league_id"] = league_id
                 converted = convert_raw_match(match)
 
+                # Skip finished matches outside the tracked date range
+                if status.get("finished"):
+                    if not match_dates:
+                        continue
+                    if get_fixture_dublin_date(converted) not in match_dates:
+                        continue
+
                 match_id = match.get("id")
                 if match_id:
-                    events, venue, scores = _fetch_match_details(match_id)
+                    page_url = match.get("pageUrl", "")
+                    events, venue, scores = _fetch_match_details(
+                        match_id, page_url=page_url
+                    )
                     converted["events"] = events
                     if events:
-                        _events_cache[converted["fixture"]["id"]] = events
+                        fid = converted["fixture"]["id"]
+                        _events_cache[fid] = events
+                        _persist_events(fid, events)
                     if venue:
                         converted["fixture"]["venue"]["name"] = venue
                     home_score, away_score = scores
@@ -456,68 +491,65 @@ def update_reddit_post(post_id: str, new_body: str) -> bool:
         return False
 
 
-def _enrich_fixture_scores(fixture: dict[str, Any]) -> None:
-    """Fill in missing scores from matchDetails for started/finished fixtures.
+def _enrich_fixture(fixture: dict[str, Any]) -> None:
+    """Fill in missing scores and events from matchDetails.
 
-    Uses the per-run _score_cache to avoid redundant API calls.
+    Makes a single API call to fetch both, using per-run caches to
+    avoid redundant requests.
     """
-    goals = fixture.get("goals", {})
-    if goals.get("home") is not None:
-        return  # Already has scores
-
     status_short = fixture.get("fixture", {}).get("status", {}).get("short", "NS")
     if status_short in ("TBD", "NS"):
-        return  # Pre-match, no scores expected
+        return
 
     fixture_id = fixture.get("fixture", {}).get("id")
     if not fixture_id:
         return
 
-    # Check per-run cache first
-    if fixture_id in _score_cache:
+    goals = fixture.get("goals", {})
+    needs_scores = goals.get("home") is None
+    needs_events = not fixture.get("events")
+
+    # Satisfy from caches first
+    if needs_scores and fixture_id in _score_cache:
         home, away = _score_cache[fixture_id]
         fixture["goals"]["home"] = home
         fixture["goals"]["away"] = away
+        needs_scores = False
+
+    if needs_events and fixture_id in _events_cache:
+        fixture["events"] = _events_cache[fixture_id]
+        needs_events = False
+
+    # Check persisted file cache for events saved during live play
+    if needs_events:
+        persisted = _load_persisted_events(fixture_id)
+        if persisted:
+            fixture["events"] = persisted
+            _events_cache[fixture_id] = persisted
+            needs_events = False
+
+    if not needs_scores and not needs_events:
         return
 
-    # Fetch from matchDetails
-    details = client.get_match_details(fixture_id)
-    if details:
+    # Single API call for whatever is still missing
+    page_url = fixture.get("_page_url", "")
+    details = client.get_match_details(fixture_id, page_url=page_url)
+    if not details:
+        return
+
+    if needs_scores:
         home_score, away_score = extract_score_from_details(details)
         if home_score is not None:
             fixture["goals"]["home"] = home_score
             fixture["goals"]["away"] = away_score
             _score_cache[fixture_id] = (home_score, away_score)
 
-
-def _enrich_fixture_events(fixture: dict[str, Any]) -> None:
-    """Fill in missing events from cache or matchDetails for finished fixtures.
-
-    Uses the per-run _events_cache to preserve scorers after matches end.
-    """
-    if fixture.get("events"):
-        return  # Already has events
-
-    status_short = fixture.get("fixture", {}).get("status", {}).get("short", "NS")
-    if status_short in ("TBD", "NS"):
-        return  # Pre-match, no events expected
-
-    fixture_id = fixture.get("fixture", {}).get("id")
-    if not fixture_id:
-        return
-
-    # Check per-run cache first
-    if fixture_id in _events_cache:
-        fixture["events"] = _events_cache[fixture_id]
-        return
-
-    # Fetch from matchDetails for finished matches
-    details = client.get_match_details(fixture_id)
-    if details:
+    if needs_events:
         events = convert_match_events(details)
         if events:
             fixture["events"] = events
             _events_cache[fixture_id] = events
+            _persist_events(fixture_id, events)
 
 
 def _get_weekly_fixtures_with_live_scores(
@@ -567,8 +599,7 @@ def _get_weekly_fixtures_with_live_scores(
 
     # Enrich fixtures that have null scores or missing events
     for fixture in merged:
-        _enrich_fixture_scores(fixture)
-        _enrich_fixture_events(fixture)
+        _enrich_fixture(fixture)
 
     return merged
 
@@ -640,7 +671,11 @@ def _get_todays_fixtures(today, league_ids):
 
 
 def _cleanup_finished_match_day(cache, today, competitions_today):
-    """Remove today from cache when tracked competitions finish.
+    """Mark today as completed when tracked competitions finish.
+
+    Adds today to ``completed_dates`` so the updater stops polling for this
+    day, but keeps ``match_dates`` intact so the post body still includes
+    all fixtures for the full week.
 
     Args:
         cache: The current cache dictionary
@@ -665,11 +700,13 @@ def _cleanup_finished_match_day(cache, today, competitions_today):
             logger.info("%s still has matches in progress or not yet finished.", comp_name)
             continue
 
-        match_dates = cache.get(comp_name, {}).get("match_dates", [])
-        if today_str in match_dates:
-            match_dates.remove(today_str)
+        comp_cache = cache.get(comp_name, {})
+        completed = comp_cache.get("completed_dates", [])
+        if today_str not in completed:
+            completed.append(today_str)
+            comp_cache["completed_dates"] = completed
             cache_updated = True
-            logger.info("Removed %s from %s match_dates", today_str, comp_name)
+            logger.info("Marked %s as completed for %s", today_str, comp_name)
 
     if cache_updated:
         save_cache(cache)
@@ -692,38 +729,28 @@ def main():
         "fai_cup": LEAGUE_ID_FAI_CUP,
     }
 
-    competitions_today = {
-        comp_name: league_id
-        for comp_name, league_id in competition_map.items()
-        if today.isoformat() in cache.get(comp_name, {}).get("match_dates", [])
-    }
+    today_str = today.isoformat()
+    competitions_today = {}
+    for comp_name, league_id in competition_map.items():
+        comp_cache = cache.get(comp_name, {})
+        if today_str in comp_cache.get("match_dates", []):
+            if today_str not in comp_cache.get("completed_dates", []):
+                competitions_today[comp_name] = league_id
 
     if not competitions_today:
         logger.info("No matches scheduled for %s, exiting.", today.isoformat())
         return
 
     league_ids = list(competitions_today.values())
-    live_fixtures = get_live_fixtures(league_ids)
 
-    if not live_fixtures:
-        logger.info(
-            "No live fixtures found, performing final update before cleanup."
-        )
-        for comp_name, league_id in competitions_today.items():
-            update_league_thread(comp_name, cache[comp_name], [], league_id)
+    all_match_dates: set[str] = set()
+    for comp_name in competitions_today:
+        all_match_dates.update(cache[comp_name].get("match_dates", []))
 
-        cache_for_cleanup = load_cache()
-        for comp_name in competitions_today:
-            if comp_name not in cache_for_cleanup and comp_name in cache:
-                cache_for_cleanup[comp_name] = cache[comp_name]
+    live_fixtures = get_live_fixtures(league_ids, match_dates=all_match_dates)
 
-        _cleanup_finished_match_day(cache_for_cleanup, today, competitions_today)
-        return
-
-    logger.info("Found %d live fixtures", len(live_fixtures))
-
-    next_poll = rate_limiter.get_polling_interval()
-    logger.info("Next poll in %ss", next_poll)
+    if live_fixtures:
+        logger.info("Found %d active fixtures", len(live_fixtures))
 
     fixtures_by_league = {league_id: [] for league_id in league_ids}
     for fixture in live_fixtures:
@@ -739,6 +766,14 @@ def main():
             league_id
         )
 
+    # Check if all matches for today are done and mark day complete
+    cache_for_cleanup = load_cache()
+    for comp_name in competitions_today:
+        if comp_name not in cache_for_cleanup and comp_name in cache:
+            cache_for_cleanup[comp_name] = cache[comp_name]
+    _cleanup_finished_match_day(cache_for_cleanup, today, competitions_today)
+
+    next_poll = rate_limiter.get_polling_interval()
     logger.info("Updated threads. Next poll in %ss.", next_poll)
 
 
