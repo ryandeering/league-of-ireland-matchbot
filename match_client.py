@@ -13,6 +13,8 @@ from zoneinfo import ZoneInfo
 
 import requests
 
+from models import Fixture, GoalEvent, MatchStatus, Standing, Team, Venue
+
 logger = logging.getLogger(__name__)
 
 # League IDs for League of Ireland competitions
@@ -335,16 +337,14 @@ def _extract_elapsed_time(status: dict[str, Any]) -> Optional[int]:
     return None
 
 
-def convert_raw_match(raw_match: dict[str, Any]) -> dict[str, Any]:
-    """Convert raw match format to api-football compatible format.
-
-    This allows existing code to work with minimal changes.
+def to_fixture(raw_match: dict[str, Any]) -> Fixture:
+    """Convert a raw FotMob match dict into a Fixture.
 
     Args:
         raw_match: Match data from external API
 
     Returns:
-        Match data in api-football format
+        Fixture instance
     """
     status = raw_match.get("status", {})
 
@@ -371,40 +371,26 @@ def convert_raw_match(raw_match: dict[str, Any]) -> dict[str, Any]:
     home_data = raw_match.get("home", {})
     away_data = raw_match.get("away", {})
 
-    return {
-        "fixture": {
-            "id": int(raw_match.get("id", 0)),
-            "date": match_date,
-            "status": {
-                "short": status_short,
-                "elapsed": elapsed,
-            },
-            "venue": {
-                "name": raw_match.get("venue", "TBD"),
-            },
-        },
-        "league": {
-            "id": raw_match.get("_league_id", 0),
-            "round": f"Regular Season - {raw_match.get('round') or ''}",
-        },
-        "teams": {
-            "home": {
-                "id": int(home_data.get("id", 0)),
-                "name": home_data.get("name", "Unknown"),
-            },
-            "away": {
-                "id": int(away_data.get("id", 0)),
-                "name": away_data.get("name", "Unknown"),
-            },
-        },
-        "goals": {
-            "home": home_score,
-            "away": away_score,
-        },
-        "events": [],
-        "_source_id": raw_match.get("id"),
-        "_page_url": raw_match.get("pageUrl", ""),
-    }
+    return Fixture(
+        id=int(raw_match.get("id", 0)),
+        date=match_date,
+        status=MatchStatus(short=status_short, elapsed=elapsed),
+        venue=Venue(name=raw_match.get("venue", "TBD")),
+        home=Team(
+            id=int(home_data.get("id", 0)),
+            name=home_data.get("name", "Unknown"),
+        ),
+        away=Team(
+            id=int(away_data.get("id", 0)),
+            name=away_data.get("name", "Unknown"),
+        ),
+        home_goals=home_score,
+        away_goals=away_score,
+        league_id=raw_match.get("_league_id", 0),
+        round=f"Regular Season - {raw_match.get('round') or ''}",
+        events=[],
+        page_url=raw_match.get("pageUrl", ""),
+    )
 
 
 def _parse_scores_str(scores_str: str) -> tuple[int, int]:
@@ -425,42 +411,33 @@ def _parse_scores_str(scores_str: str) -> tuple[int, int]:
     return 0, 0
 
 
-def convert_raw_table(raw_table: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Convert raw table format to api-football compatible format.
+def to_standing(raw_row: dict[str, Any]) -> Standing:
+    """Convert a single raw FotMob table row into a Standing.
 
     Args:
-        raw_table: Table data from external API
+        raw_row: Single row from the league table API response
 
     Returns:
-        Table data in api-football format
+        Standing instance
     """
-    converted = []
+    goals_for, goals_against = _parse_scores_str(raw_row.get("scoresStr", ""))
 
-    for row in raw_table:
-        goals_for, goals_against = _parse_scores_str(row.get("scoresStr", ""))
-
-        converted.append({
-            "rank": row.get("idx", 0),
-            "team": {
-                "id": row.get("id", 0),
-                "name": row.get("name", "Unknown"),
-            },
-            "all": {
-                "played": row.get("played", 0),
-                "win": row.get("wins", 0),
-                "draw": row.get("draws", 0),
-                "lose": row.get("losses", 0),
-                "goals": {
-                    "for": goals_for,
-                    "against": goals_against,
-                },
-            },
-            "goalsDiff": row.get("goalConDiff", 0),
-            "points": row.get("pts", 0),
-            "form": row.get("_form", ""),
-        })
-
-    return converted
+    return Standing(
+        rank=raw_row.get("idx", 0),
+        team=Team(
+            id=raw_row.get("id", 0),
+            name=raw_row.get("name", "Unknown"),
+        ),
+        played=raw_row.get("played", 0),
+        won=raw_row.get("wins", 0),
+        drawn=raw_row.get("draws", 0),
+        lost=raw_row.get("losses", 0),
+        goals_for=goals_for,
+        goals_against=goals_against,
+        goal_diff=raw_row.get("goalConDiff", 0),
+        points=raw_row.get("pts", 0),
+        form=raw_row.get("_form", ""),
+    )
 
 
 def extract_venue_from_details(match_details: dict[str, Any]) -> str:
@@ -507,8 +484,8 @@ def extract_score_from_details(
 
 def enrich_fixtures_with_venues(
     client: MatchDataClient,
-    fixtures: list[dict[str, Any]]
-) -> list[dict[str, Any]]:
+    fixtures: list[Fixture]
+) -> list[Fixture]:
     """Fetch venue and score data for each fixture from match details endpoint.
 
     Also fills in missing scores from matchDetails when the leagues
@@ -516,37 +493,37 @@ def enrich_fixtures_with_venues(
 
     Args:
         client: MatchDataClient instance
-        fixtures: List of fixtures in api-football format
+        fixtures: List of Fixture instances
 
     Returns:
         Same fixtures with venue names and scores populated
     """
     for fixture in fixtures:
-        match_id = fixture.get("fixture", {}).get("id")
+        match_id = fixture.id
         if match_id:
             details = client.get_match_details(match_id)
             if details:
                 venue = extract_venue_from_details(details)
                 if venue:
-                    fixture["fixture"]["venue"]["name"] = venue
-                if fixture.get("goals", {}).get("home") is None:
+                    fixture.venue = Venue(name=venue)
+                if fixture.home_goals is None:
                     home, away = extract_score_from_details(details)
                     if home is not None:
-                        fixture["goals"]["home"] = home
-                        fixture["goals"]["away"] = away
+                        fixture.home_goals = home
+                        fixture.away_goals = away
     return fixtures
 
 
-def convert_match_events(match_details: dict[str, Any]) -> list[dict[str, Any]]:
-    """Extract and convert events from match details.
+def to_events(match_details: dict[str, Any]) -> list[GoalEvent]:
+    """Extract goal events from match details.
 
     Args:
         match_details: Full match details from API
 
     Returns:
-        List of events in api-football format
+        List of GoalEvent instances
     """
-    events = []
+    goal_events: list[GoalEvent] = []
 
     content = match_details.get("content", {})
     match_facts = content.get("matchFacts", {})
@@ -562,23 +539,31 @@ def convert_match_events(match_details: dict[str, Any]) -> list[dict[str, Any]]:
         event_type = event.get("type", "")
 
         if event_type == "Goal":
-            is_home = event.get("isHome", True)
-            team_name = home_team if is_home else away_team
+            is_home = event.get("isHome")
 
-            detail = "Normal Goal"
-            if event.get("ownGoal"):
-                detail = "Own Goal"
-            elif (event.get("isPenalty")
-                  or event.get("goalDescriptionKey") == "penalty"):
-                detail = "Penalty"
+            if is_home is None:
+                # Fallback: resolve team name from nested team dict or teamName
+                team_dict = event.get("team")
+                if isinstance(team_dict, dict):
+                    team_name = team_dict.get("name", "")
+                else:
+                    team_name = event.get("teamName", "")
+            else:
+                team_name = home_team if is_home else away_team
 
-            events.append({
-                "type": "Goal",
-                "team": {"name": team_name},
-                "player": {"name": event.get("nameStr", "Unknown")},
-                "time": {"elapsed": event.get("time", 0)},
-                "detail": detail,
-                "isHome": is_home,
-            })
+            is_own_goal = bool(event.get("ownGoal"))
+            is_penalty = bool(
+                event.get("isPenalty")
+                or "penalty" in (event.get("goalDescriptionKey") or "").lower()
+            )
 
-    return events
+            goal_events.append(GoalEvent(
+                player=event.get("nameStr", "Unknown"),
+                team=team_name,
+                minute=event.get("time", 0),
+                is_home=is_home,
+                is_penalty=is_penalty,
+                is_own_goal=is_own_goal,
+            ))
+
+    return goal_events

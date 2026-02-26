@@ -5,15 +5,16 @@ from unittest.mock import Mock, patch
 
 import requests
 
+from models import Fixture, GoalEvent, MatchStatus, Team, Venue
 from match_client import (
     MatchDataClient,
-    convert_raw_match,
-    convert_raw_table,
-    convert_match_events,
+    to_fixture,
+    to_standing,
+    to_events,
     extract_score_from_details,
     LEAGUE_ID_PREMIER,
 )
-from common import format_live_fixture, get_match_status_display
+from common import format_live_fixture, get_match_status_display, extract_scorers
 
 
 class TestLiveMatch(unittest.TestCase):
@@ -95,30 +96,24 @@ class TestLiveMatch(unittest.TestCase):
         }
 
     def test_convert_live_match(self):
-        """Test converting a live match to api-football format."""
-        converted = convert_raw_match(self.live_raw_match)
-
-        # Check structure
-        self.assertIn("fixture", converted)
-        self.assertIn("teams", converted)
-        self.assertIn("goals", converted)
-        self.assertIn("league", converted)
+        """Test converting a live match to Fixture."""
+        converted = to_fixture(self.live_raw_match)
 
         # Check fixture details
-        self.assertEqual(converted["fixture"]["id"], 4567890)
-        self.assertIn("status", converted["fixture"])
+        self.assertEqual(converted.id, 4567890)
+        self.assertIsInstance(converted.status, MatchStatus)
 
         # Check teams
-        self.assertEqual(converted["teams"]["home"]["name"], "Shamrock Rovers")
-        self.assertEqual(converted["teams"]["away"]["name"], "St Patrick's Athletic")
+        self.assertEqual(converted.home.name, "Shamrock Rovers")
+        self.assertEqual(converted.away.name, "St Patrick's Athletic")
 
         # Check score
-        self.assertEqual(converted["goals"]["home"], 2)
-        self.assertEqual(converted["goals"]["away"], 1)
+        self.assertEqual(converted.home_goals, 2)
+        self.assertEqual(converted.away_goals, 1)
 
     def test_live_match_status_display(self):
         """Test that live match status displays correctly."""
-        converted = convert_raw_match(self.live_raw_match)
+        converted = to_fixture(self.live_raw_match)
         score, status = get_match_status_display(converted)
 
         self.assertEqual(score, "2-1")
@@ -127,7 +122,7 @@ class TestLiveMatch(unittest.TestCase):
 
     def test_format_live_fixture(self):
         """Test formatting a live fixture for display."""
-        converted = convert_raw_match(self.live_raw_match)
+        converted = to_fixture(self.live_raw_match)
         formatted = format_live_fixture(converted)
 
         # Should return [home, score, away, venue, status, kickoff, scorers]
@@ -138,24 +133,25 @@ class TestLiveMatch(unittest.TestCase):
 
     def test_convert_match_events(self):
         """Test converting match events (goal scorers)."""
-        events = convert_match_events(self.match_details)
+        events = to_events(self.match_details)
 
         self.assertEqual(len(events), 3)
 
         # First goal - Aaron Greene 23'
-        self.assertEqual(events[0]["type"], "Goal")
-        self.assertEqual(events[0]["player"]["name"], "Aaron Greene")
-        self.assertEqual(events[0]["time"]["elapsed"], 23)
-        self.assertEqual(events[0]["team"]["name"], "Shamrock Rovers")
+        self.assertEqual(events[0].player, "Aaron Greene")
+        self.assertEqual(events[0].minute, 23)
+        self.assertEqual(events[0].team, "Shamrock Rovers")
+        self.assertFalse(events[0].is_penalty)
+        self.assertFalse(events[0].is_own_goal)
 
         # Second goal - Eoin Doyle 41' (pen)
-        self.assertEqual(events[1]["player"]["name"], "Eoin Doyle")
-        self.assertEqual(events[1]["detail"], "Penalty")
-        self.assertEqual(events[1]["team"]["name"], "St Patrick's Athletic")
+        self.assertEqual(events[1].player, "Eoin Doyle")
+        self.assertTrue(events[1].is_penalty)
+        self.assertEqual(events[1].team, "St Patrick's Athletic")
 
         # Third goal - Graham Burke 62'
-        self.assertEqual(events[2]["player"]["name"], "Graham Burke")
-        self.assertEqual(events[2]["time"]["elapsed"], 62)
+        self.assertEqual(events[2].player, "Graham Burke")
+        self.assertEqual(events[2].minute, 62)
 
     def test_penalty_via_goal_description_key(self):
         """Penalty detected via goalDescriptionKey when isPenalty is None."""
@@ -184,10 +180,43 @@ class TestLiveMatch(unittest.TestCase):
                 }
             },
         }
-        events = convert_match_events(details)
+        events = to_events(details)
         self.assertEqual(len(events), 1)
-        self.assertEqual(events[0]["detail"], "Penalty")
-        self.assertEqual(events[0]["player"]["name"], "Michael Duffy")
+        self.assertTrue(events[0].is_penalty)
+        self.assertEqual(events[0].player, "Michael Duffy")
+
+    def test_to_events_fallback_team_name(self):
+        """When isHome is absent, team name is resolved from event data."""
+        details = {
+            "header": {
+                "teams": [
+                    {"name": "Derry City", "id": "8338"},
+                    {"name": "Sligo Rovers", "id": "6361"},
+                ]
+            },
+            "content": {
+                "matchFacts": {
+                    "events": {
+                        "events": [
+                            {
+                                "type": "Goal",
+                                "time": 55,
+                                "nameStr": "Will Patching",
+                                "ownGoal": False,
+                                "isPenalty": False,
+                                "teamName": "Derry City",
+                                # No isHome key
+                            }
+                        ]
+                    }
+                }
+            },
+        }
+        events = to_events(details)
+        self.assertEqual(len(events), 1)
+        self.assertIsNone(events[0].is_home)
+        self.assertEqual(events[0].team, "Derry City")
+        self.assertEqual(events[0].player, "Will Patching")
 
 
 class TestMatchStatuses(unittest.TestCase):
@@ -213,16 +242,16 @@ class TestMatchStatuses(unittest.TestCase):
     def test_not_started_match(self):
         """Test match that hasn't started."""
         match = self._create_match(False, False, None, None)
-        converted = convert_raw_match(match)
+        converted = to_fixture(match)
         score, status = get_match_status_display(converted)
 
         self.assertEqual(score, "vs")
-        self.assertEqual(converted["fixture"]["status"]["short"], "NS")
+        self.assertEqual(converted.status.short, "NS")
 
     def test_first_half_match(self):
         """Test match in first half."""
         match = self._create_match(True, False, 1, 0, "23")
-        converted = convert_raw_match(match)
+        converted = to_fixture(match)
         score, status = get_match_status_display(converted)
 
         self.assertEqual(score, "1-0")
@@ -231,7 +260,7 @@ class TestMatchStatuses(unittest.TestCase):
     def test_half_time_match(self):
         """Test match at half time."""
         match = self._create_match(True, False, 1, 1, "HT")
-        converted = convert_raw_match(match)
+        converted = to_fixture(match)
         score, status = get_match_status_display(converted)
 
         self.assertEqual(score, "1-1")
@@ -240,7 +269,7 @@ class TestMatchStatuses(unittest.TestCase):
     def test_second_half_match(self):
         """Test match in second half."""
         match = self._create_match(True, False, 2, 1, "78")
-        converted = convert_raw_match(match)
+        converted = to_fixture(match)
         score, status = get_match_status_display(converted)
 
         self.assertEqual(score, "2-1")
@@ -249,11 +278,11 @@ class TestMatchStatuses(unittest.TestCase):
     def test_finished_match(self):
         """Test finished match."""
         match = self._create_match(True, True, 3, 2, "FT")
-        converted = convert_raw_match(match)
+        converted = to_fixture(match)
 
-        self.assertEqual(converted["fixture"]["status"]["short"], "FT")
-        self.assertEqual(converted["goals"]["home"], 3)
-        self.assertEqual(converted["goals"]["away"], 2)
+        self.assertEqual(converted.status.short, "FT")
+        self.assertEqual(converted.home_goals, 3)
+        self.assertEqual(converted.away_goals, 2)
 
 
 class TestLeagueTable(unittest.TestCase):
@@ -301,27 +330,27 @@ class TestLeagueTable(unittest.TestCase):
         ]
 
     def test_convert_table(self):
-        """Test converting raw table to api-football format."""
-        converted = convert_raw_table(self.raw_table)
+        """Test converting raw table to Standings."""
+        converted = [to_standing(row) for row in self.raw_table]
 
         self.assertEqual(len(converted), 3)
 
         # Check first place
         first = converted[0]
-        self.assertEqual(first["rank"], 1)
-        self.assertEqual(first["team"]["name"], "Shamrock Rovers")
-        self.assertEqual(first["all"]["played"], 20)
-        self.assertEqual(first["all"]["win"], 15)
-        self.assertEqual(first["all"]["draw"], 3)
-        self.assertEqual(first["all"]["lose"], 2)
-        self.assertEqual(first["all"]["goals"]["for"], 45)
-        self.assertEqual(first["all"]["goals"]["against"], 15)
-        self.assertEqual(first["goalsDiff"], 30)
-        self.assertEqual(first["points"], 48)
+        self.assertEqual(first.rank, 1)
+        self.assertEqual(first.team.name, "Shamrock Rovers")
+        self.assertEqual(first.played, 20)
+        self.assertEqual(first.won, 15)
+        self.assertEqual(first.drawn, 3)
+        self.assertEqual(first.lost, 2)
+        self.assertEqual(first.goals_for, 45)
+        self.assertEqual(first.goals_against, 15)
+        self.assertEqual(first.goal_diff, 30)
+        self.assertEqual(first.points, 48)
 
     def test_empty_table(self):
         """Test converting empty table."""
-        converted = convert_raw_table([])
+        converted = [to_standing(row) for row in []]
         self.assertEqual(converted, [])
 
     def test_scores_str_parsing(self):
@@ -329,36 +358,36 @@ class TestLeagueTable(unittest.TestCase):
         table = [{"idx": 1, "id": 1, "name": "Team", "played": 5,
                   "wins": 3, "draws": 1, "losses": 1,
                   "scoresStr": "10-4", "goalConDiff": 6, "pts": 10}]
-        converted = convert_raw_table(table)
-        self.assertEqual(converted[0]["all"]["goals"]["for"], 10)
-        self.assertEqual(converted[0]["all"]["goals"]["against"], 4)
+        converted = [to_standing(row) for row in table]
+        self.assertEqual(converted[0].goals_for, 10)
+        self.assertEqual(converted[0].goals_against, 4)
 
     def test_missing_scores_str_defaults_to_zero(self):
         """Row with no scoresStr should default GF/GA to 0."""
         table = [{"idx": 1, "id": 1, "name": "Team", "played": 0,
                   "wins": 0, "draws": 0, "losses": 0,
                   "goalConDiff": 0, "pts": 0}]
-        converted = convert_raw_table(table)
-        self.assertEqual(converted[0]["all"]["goals"]["for"], 0)
-        self.assertEqual(converted[0]["all"]["goals"]["against"], 0)
+        converted = [to_standing(row) for row in table]
+        self.assertEqual(converted[0].goals_for, 0)
+        self.assertEqual(converted[0].goals_against, 0)
 
     def test_zero_zero_scores_str(self):
         """scoresStr '0-0' should parse to GF=0, GA=0."""
         table = [{"idx": 1, "id": 1, "name": "Team", "played": 1,
                   "wins": 0, "draws": 1, "losses": 0,
                   "scoresStr": "0-0", "goalConDiff": 0, "pts": 1}]
-        converted = convert_raw_table(table)
-        self.assertEqual(converted[0]["all"]["goals"]["for"], 0)
-        self.assertEqual(converted[0]["all"]["goals"]["against"], 0)
+        converted = [to_standing(row) for row in table]
+        self.assertEqual(converted[0].goals_for, 0)
+        self.assertEqual(converted[0].goals_against, 0)
 
     def test_high_scoring_scores_str(self):
         """scoresStr with double-digit values should parse correctly."""
         table = [{"idx": 1, "id": 1, "name": "Team", "played": 20,
                   "wins": 15, "draws": 3, "losses": 2,
                   "scoresStr": "45-15", "goalConDiff": 30, "pts": 48}]
-        converted = convert_raw_table(table)
-        self.assertEqual(converted[0]["all"]["goals"]["for"], 45)
-        self.assertEqual(converted[0]["all"]["goals"]["against"], 15)
+        converted = [to_standing(row) for row in table]
+        self.assertEqual(converted[0].goals_for, 45)
+        self.assertEqual(converted[0].goals_against, 15)
 
 
 class TestMatchDataClientIntegration(unittest.TestCase):
@@ -505,11 +534,11 @@ class TestExtractScoreFromDetails(unittest.TestCase):
             },
             "_league_id": 126,
         }
-        converted = convert_raw_match(raw_match)
+        converted = to_fixture(raw_match)
 
         # Scores should be None from leagues endpoint
-        self.assertIsNone(converted["goals"]["home"])
-        self.assertIsNone(converted["goals"]["away"])
+        self.assertIsNone(converted.home_goals)
+        self.assertIsNone(converted.away_goals)
 
         # matchDetails has the real scores
         details = {
@@ -525,9 +554,8 @@ class TestExtractScoreFromDetails(unittest.TestCase):
         self.assertEqual(away, 1)
 
         # After enrichment, scores should be correct
-        converted["goals"]["home"] = home
-        converted["goals"]["away"] = away
-        from common import get_match_status_display
+        converted.home_goals = home
+        converted.away_goals = away
         score, status = get_match_status_display(converted)
         self.assertEqual(score, "2-1")
         self.assertEqual(status, "FT")
@@ -536,6 +564,24 @@ class TestExtractScoreFromDetails(unittest.TestCase):
 class TestScorerAttribution(unittest.TestCase):
     """Test goal scorer attribution with isHome flag vs name comparison."""
 
+    def _make_fixture(self, **overrides):
+        """Helper to create a Fixture with sensible defaults."""
+        defaults = dict(
+            id=1,
+            date="2025-07-18T19:45:00Z",
+            status=MatchStatus(short="2H", elapsed=67),
+            venue=Venue(name="Stadium"),
+            home=Team(id=1, name="St Patrick's Athl."),
+            away=Team(id=2, name="Shelbourne"),
+            home_goals=1,
+            away_goals=1,
+            league_id=126,
+            round="Regular Season - 15",
+            events=[],
+        )
+        defaults.update(overrides)
+        return Fixture(**defaults)
+
     def test_scorer_attributed_by_ishome_flag(self):
         """Test scorers are attributed using isHome flag, not team name.
 
@@ -543,30 +589,26 @@ class TestScorerAttribution(unittest.TestCase):
         (e.g. "St Patrick's Athl." vs "St. Patrick's Athletic"). The isHome
         flag avoids this mismatch entirely.
         """
-        fixture = {
-            "teams": {
-                "home": {"name": "St Patrick's Athl."},
-                "away": {"name": "Shelbourne"},
-            },
-            "events": [
-                {
-                    "type": "Goal",
-                    "team": {"name": "St. Patrick's Athletic"},  # Different variant!
-                    "player": {"name": "Chris Forrester"},
-                    "time": {"elapsed": 34},
-                    "detail": "Normal Goal",
-                    "isHome": True,
-                },
-                {
-                    "type": "Goal",
-                    "team": {"name": "Shelbourne FC"},  # Different variant!
-                    "player": {"name": "Sean Boyd"},
-                    "time": {"elapsed": 67},
-                    "detail": "Normal Goal",
-                    "isHome": False,
-                },
+        fixture = self._make_fixture(
+            events=[
+                GoalEvent(
+                    player="Chris Forrester",
+                    team="St. Patrick's Athletic",  # Different variant!
+                    minute=34,
+                    is_home=True,
+                    is_penalty=False,
+                    is_own_goal=False,
+                ),
+                GoalEvent(
+                    player="Sean Boyd",
+                    team="Shelbourne FC",  # Different variant!
+                    minute=67,
+                    is_home=False,
+                    is_penalty=False,
+                    is_own_goal=False,
+                ),
             ],
-        }
+        )
 
         scorers = format_live_fixture(fixture)
         # Scorers column should have both goals attributed correctly
@@ -576,24 +618,21 @@ class TestScorerAttribution(unittest.TestCase):
 
     def test_scorer_fallback_to_team_name_when_no_ishome(self):
         """Test scorers fall back to team name comparison when isHome is absent."""
-        fixture = {
-            "teams": {
-                "home": {"name": "Derry City"},
-                "away": {"name": "Sligo Rovers"},
-            },
-            "events": [
-                {
-                    "type": "Goal",
-                    "team": {"name": "Derry City"},
-                    "player": {"name": "Will Patching"},
-                    "time": {"elapsed": 12},
-                    "detail": "Normal Goal",
-                    # No isHome key
-                },
+        fixture = self._make_fixture(
+            home=Team(id=1, name="Derry City"),
+            away=Team(id=2, name="Sligo Rovers"),
+            events=[
+                GoalEvent(
+                    player="Will Patching",
+                    team="Derry City",
+                    minute=12,
+                    is_home=None,
+                    is_penalty=False,
+                    is_own_goal=False,
+                ),
             ],
-        }
+        )
 
-        from common import extract_scorers
         scorers = extract_scorers(fixture)
         self.assertEqual(len(scorers["home"]), 1)
         self.assertEqual(scorers["home"][0]["name"], "Will Patching")
@@ -601,24 +640,19 @@ class TestScorerAttribution(unittest.TestCase):
 
     def test_scorer_name_mismatch_without_ishome_goes_to_away(self):
         """Test that name mismatch without isHome puts scorer in away bucket."""
-        fixture = {
-            "teams": {
-                "home": {"name": "St Patrick's Athl."},
-                "away": {"name": "Shelbourne"},
-            },
-            "events": [
-                {
-                    "type": "Goal",
-                    "team": {"name": "St. Patrick's Athletic"},  # No match!
-                    "player": {"name": "Chris Forrester"},
-                    "time": {"elapsed": 34},
-                    "detail": "Normal Goal",
-                    # No isHome key - name won't match home team
-                },
+        fixture = self._make_fixture(
+            events=[
+                GoalEvent(
+                    player="Chris Forrester",
+                    team="St. Patrick's Athletic",  # No match!
+                    minute=34,
+                    is_home=None,
+                    is_penalty=False,
+                    is_own_goal=False,
+                ),
             ],
-        }
+        )
 
-        from common import extract_scorers
         scorers = extract_scorers(fixture)
         # Without isHome, the name mismatch causes it to go to away
         self.assertEqual(len(scorers["home"]), 0)

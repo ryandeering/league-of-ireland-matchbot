@@ -4,7 +4,9 @@ Uses actual formatting code with simulated live match data.
 """
 
 import praw
-from match_client import convert_raw_match
+
+from match_client import to_fixture
+from models import GoalEvent, Standing, Team
 from live_updater import build_premier_body
 from matchbot_config import MatchbotConfig
 
@@ -64,48 +66,52 @@ def create_test_fixtures():
 
 
 def create_test_table():
-    """Create simulated league table data."""
+    """Create simulated league table data as Standings."""
     return [
-        {"rank": 1, "team": {"id": 1, "name": "Shamrock Rovers"},
-         "all": {"played": 14, "win": 10, "draw": 3, "lose": 1,
-                 "goals": {"for": 28, "against": 10}},
-         "goalsDiff": 18, "points": 33, "form": "WWDWW"},
-        {"rank": 2, "team": {"id": 4, "name": "Shelbourne"},
-         "all": {"played": 14, "win": 9, "draw": 3, "lose": 2, "goals": {"for": 25, "against": 12}},
-         "goalsDiff": 13, "points": 30, "form": "WDWWL"},
-        {"rank": 3, "team": {"id": 3, "name": "St Patrick's Athletic"},
-         "all": {"played": 14, "win": 8, "draw": 4, "lose": 2, "goals": {"for": 22, "against": 14}},
-         "goalsDiff": 8, "points": 28, "form": "DWWDW"},
-        {"rank": 4, "team": {"id": 5, "name": "Derry City"},
-         "all": {"played": 14, "win": 7, "draw": 4, "lose": 3, "goals": {"for": 20, "against": 15}},
-         "goalsDiff": 5, "points": 25, "form": "WLDWW"},
-        {"rank": 5, "team": {"id": 2, "name": "Bohemian FC"},
-         "all": {"played": 14, "win": 6, "draw": 3, "lose": 5, "goals": {"for": 18, "against": 18}},
-         "goalsDiff": 0, "points": 21, "form": "LDWLW"},
+        Standing(rank=1, team=Team(id=1, name="Shamrock Rovers"),
+                 played=14, won=10, drawn=3, lost=1,
+                 goals_for=28, goals_against=10,
+                 goal_diff=18, points=33, form="WWDWW"),
+        Standing(rank=2, team=Team(id=4, name="Shelbourne"),
+                 played=14, won=9, drawn=3, lost=2,
+                 goals_for=25, goals_against=12,
+                 goal_diff=13, points=30, form="WDWWL"),
+        Standing(rank=3, team=Team(id=3, name="St Patrick's Athletic"),
+                 played=14, won=8, drawn=4, lost=2,
+                 goals_for=22, goals_against=14,
+                 goal_diff=8, points=28, form="DWWDW"),
+        Standing(rank=4, team=Team(id=5, name="Derry City"),
+                 played=14, won=7, drawn=4, lost=3,
+                 goals_for=20, goals_against=15,
+                 goal_diff=5, points=25, form="WLDWW"),
+        Standing(rank=5, team=Team(id=2, name="Bohemian FC"),
+                 played=14, won=6, drawn=3, lost=5,
+                 goals_for=18, goals_against=18,
+                 goal_diff=0, points=21, form="LDWLW"),
     ]
 
 
 def main():
     """Post test thread to r/test."""
     raw_fixtures = create_test_fixtures()
-    converted = [convert_raw_match(f) for f in raw_fixtures]
+    converted = [to_fixture(f) for f in raw_fixtures]
 
     # Simulate Aaron Greene scoring twice
-    converted[0]['events'] = [
-        {'type': 'Goal', 'team': {'name': 'Shamrock Rovers'},
-         'player': {'name': 'Aaron Greene'}, 'time': {'elapsed': 23}, 'detail': 'Normal Goal'},
-        {'type': 'Goal', 'team': {'name': 'Bohemian FC'},
-         'player': {'name': 'Dawson Devoy'}, 'time': {'elapsed': 34}, 'detail': 'Penalty'},
-        {'type': 'Goal', 'team': {'name': 'Shamrock Rovers'},
-         'player': {'name': 'Aaron Greene'}, 'time': {'elapsed': 62}, 'detail': 'Normal Goal'},
+    converted[0].events = [
+        GoalEvent(player='Aaron Greene', team='Shamrock Rovers', minute=23,
+                  is_home=True, is_penalty=False, is_own_goal=False),
+        GoalEvent(player='Dawson Devoy', team='Bohemian FC', minute=34,
+                  is_home=False, is_penalty=True, is_own_goal=False),
+        GoalEvent(player='Aaron Greene', team='Shamrock Rovers', minute=62,
+                  is_home=True, is_penalty=False, is_own_goal=False),
     ]
-    converted[2]['events'] = [
-        {'type': 'Goal', 'team': {'name': 'Derry City'},
-         'player': {'name': 'Patrick McEleney'}, 'time': {'elapsed': 12}, 'detail': 'Normal Goal'},
+    converted[2].events = [
+        GoalEvent(player='Patrick McEleney', team='Derry City', minute=12,
+                  is_home=True, is_penalty=False, is_own_goal=False),
     ]
 
     league_table = create_test_table()
-    body = build_premier_body(converted, league_table, 15)
+    body = build_premier_body(converted, league_table)
 
     print("=" * 60)
     print("POST PREVIEW")

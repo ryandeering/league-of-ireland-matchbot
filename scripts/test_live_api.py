@@ -5,8 +5,8 @@ from match_client import (
     LEAGUE_ID_PREMIER,
     LEAGUE_ID_FIRST,
     LEAGUE_ID_FAI_CUP,
-    convert_raw_table,
-    convert_match_events,
+    to_standing,
+    to_events,
 )
 
 # Additional leagues for testing
@@ -42,15 +42,14 @@ def check_league_live(client, league_id, league_name):
                 if match_id:
                     try:
                         details = client.get_match_details(int(match_id))
-                        events = convert_match_events(details)
+                        events = to_events(details)
                         if events:
                             for e in events:
-                                player = e["player"]["name"]
-                                minute = e["time"]["elapsed"]
-                                detail = e.get("detail", "")
-                                if detail == "Penalty":
+                                player = e.player
+                                minute = e.minute
+                                if e.is_penalty:
                                     suffix = " (P)"
-                                elif detail == "Own Goal":
+                                elif e.is_own_goal:
                                     suffix = " (OG)"
                                 else:
                                     suffix = ""
@@ -93,7 +92,7 @@ def main():
     print("\n--- LOI Premier Division Table ---")
     try:
         table = client.get_league_table(LEAGUE_ID_PREMIER)
-        converted_table = convert_raw_table(table or [])
+        converted_table = [to_standing(row) for row in (table or [])]
         print(f"Found {len(converted_table)} teams")
 
         if converted_table:
@@ -101,13 +100,13 @@ def main():
             print("  " + "-" * 50)
             for team in converted_table[:5]:
                 print(
-                    f"  {team['rank']:<4} "
-                    f"{team['team']['name'][:24]:<25} "
-                    f"{team['all']['played']:<3} "
-                    f"{team['all']['win']:<3} "
-                    f"{team['all']['draw']:<3} "
-                    f"{team['all']['lose']:<3} "
-                    f"{team['points']:<4}"
+                    f"  {team.rank:<4} "
+                    f"{team.team.name[:24]:<25} "
+                    f"{team.played:<3} "
+                    f"{team.won:<3} "
+                    f"{team.drawn:<3} "
+                    f"{team.lost:<3} "
+                    f"{team.points:<4}"
                 )
     except Exception as e:
         print(f"Error: {e}")

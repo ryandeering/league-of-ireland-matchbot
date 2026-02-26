@@ -3,12 +3,32 @@
 import unittest
 from unittest.mock import patch
 
+from models import Fixture, MatchStatus, Team, Venue
 from fai_cup import (
     get_current_round,
     get_matches_for_cup,
     get_matches_for_round,
     get_round_display_name,
 )
+
+
+def _make_fixture(**overrides):
+    """Helper to create a Fixture with sensible defaults."""
+    defaults = dict(
+        id=1,
+        date="2025-08-01T19:45:00+00:00",
+        status=MatchStatus(short="NS", elapsed=None),
+        venue=Venue(name="Stadium"),
+        home=Team(id=1, name="Team A"),
+        away=Team(id=2, name="Team B"),
+        home_goals=None,
+        away_goals=None,
+        league_id=219,
+        round="FAI Cup - Quarter-finals",
+        events=[],
+    )
+    defaults.update(overrides)
+    return Fixture(**defaults)
 
 
 class TestFAICupFixtures(unittest.TestCase):
@@ -63,10 +83,10 @@ class TestFAICupFixtures(unittest.TestCase):
         matches = get_matches_for_cup()
 
         self.assertEqual(len(matches), 1)
-        self.assertEqual(matches[0]["fixture"]["id"], 100)
-        self.assertEqual(matches[0]["fixture"]["status"]["short"], "FT")
-        self.assertEqual(matches[0]["goals"]["home"], 2)
-        self.assertEqual(matches[0]["goals"]["away"], 1)
+        self.assertEqual(matches[0].id, 100)
+        self.assertEqual(matches[0].status.short, "FT")
+        self.assertEqual(matches[0].home_goals, 2)
+        self.assertEqual(matches[0].away_goals, 1)
 
 
 class TestFAICupRounds(unittest.TestCase):
@@ -75,14 +95,14 @@ class TestFAICupRounds(unittest.TestCase):
     def test_get_current_round_fallback_uses_latest_match_date(self):
         """Test fallback round uses the latest match by date, not list order."""
         matches = [
-            {
-                "fixture": {"date": "2025-10-01T19:45:00+00:00"},
-                "league": {"round": "FAI Cup - Final"},
-            },
-            {
-                "fixture": {"date": "2025-08-15T19:45:00+00:00"},
-                "league": {"round": "FAI Cup - Semi-finals"},
-            },
+            _make_fixture(
+                date="2025-10-01T19:45:00+00:00",
+                round="FAI Cup - Final",
+            ),
+            _make_fixture(
+                date="2025-08-15T19:45:00+00:00",
+                round="FAI Cup - Semi-finals",
+            ),
         ]
 
         round_name = get_current_round(matches)
@@ -99,65 +119,65 @@ class TestFAICupRoundFiltering(unittest.TestCase):
         would match 'Round 10', 'Round 11', etc.
         """
         matches = [
-            {
-                "fixture": {"date": "2025-06-01T19:45:00+00:00"},
-                "league": {"round": "Regular Season - 1"},
-            },
-            {
-                "fixture": {"date": "2025-07-01T19:45:00+00:00"},
-                "league": {"round": "Regular Season - 10"},
-            },
-            {
-                "fixture": {"date": "2025-07-15T19:45:00+00:00"},
-                "league": {"round": "Regular Season - 11"},
-            },
+            _make_fixture(
+                date="2025-06-01T19:45:00+00:00",
+                round="Regular Season - 1",
+            ),
+            _make_fixture(
+                date="2025-07-01T19:45:00+00:00",
+                round="Regular Season - 10",
+            ),
+            _make_fixture(
+                date="2025-07-15T19:45:00+00:00",
+                round="Regular Season - 11",
+            ),
         ]
 
         round_1 = get_matches_for_round(matches, "1")
         self.assertEqual(len(round_1), 1)
-        self.assertEqual(round_1[0]["league"]["round"], "Regular Season - 1")
+        self.assertEqual(round_1[0].round, "Regular Season - 1")
 
     def test_round_2_does_not_match_round_12_or_21(self):
         """Test round '2' doesn't match '12', '20', '21', '22'."""
         matches = [
-            {"fixture": {"date": "2025-06-01T19:45:00+00:00"},
-             "league": {"round": "Regular Season - 2"}},
-            {"fixture": {"date": "2025-07-01T19:45:00+00:00"},
-             "league": {"round": "Regular Season - 12"}},
-            {"fixture": {"date": "2025-08-01T19:45:00+00:00"},
-             "league": {"round": "Regular Season - 20"}},
-            {"fixture": {"date": "2025-08-15T19:45:00+00:00"},
-             "league": {"round": "Regular Season - 21"}},
-            {"fixture": {"date": "2025-09-01T19:45:00+00:00"},
-             "league": {"round": "Regular Season - 22"}},
+            _make_fixture(date="2025-06-01T19:45:00+00:00",
+                          round="Regular Season - 2"),
+            _make_fixture(date="2025-07-01T19:45:00+00:00",
+                          round="Regular Season - 12"),
+            _make_fixture(date="2025-08-01T19:45:00+00:00",
+                          round="Regular Season - 20"),
+            _make_fixture(date="2025-08-15T19:45:00+00:00",
+                          round="Regular Season - 21"),
+            _make_fixture(date="2025-09-01T19:45:00+00:00",
+                          round="Regular Season - 22"),
         ]
 
         round_2 = get_matches_for_round(matches, "2")
         self.assertEqual(len(round_2), 1)
-        self.assertEqual(round_2[0]["league"]["round"], "Regular Season - 2")
+        self.assertEqual(round_2[0].round, "Regular Season - 2")
 
     def test_named_round_exact_match(self):
         """Test named rounds like 'Semi-finals' use exact match."""
         matches = [
-            {"fixture": {"date": "2025-08-01T19:45:00+00:00"},
-             "league": {"round": "FAI Cup - Semi-finals"}},
-            {"fixture": {"date": "2025-09-01T19:45:00+00:00"},
-             "league": {"round": "FAI Cup - Final"}},
+            _make_fixture(date="2025-08-01T19:45:00+00:00",
+                          round="FAI Cup - Semi-finals"),
+            _make_fixture(date="2025-09-01T19:45:00+00:00",
+                          round="FAI Cup - Final"),
         ]
 
         semis = get_matches_for_round(matches, "Semi-finals")
         self.assertEqual(len(semis), 1)
-        self.assertEqual(semis[0]["league"]["round"], "FAI Cup - Semi-finals")
+        self.assertEqual(semis[0].round, "FAI Cup - Semi-finals")
 
         final = get_matches_for_round(matches, "Final")
         self.assertEqual(len(final), 1)
-        self.assertEqual(final[0]["league"]["round"], "FAI Cup - Final")
+        self.assertEqual(final[0].round, "FAI Cup - Final")
 
     def test_empty_round_returns_empty(self):
         """Test that empty current_round returns no matches."""
         matches = [
-            {"fixture": {"date": "2025-08-01T19:45:00+00:00"},
-             "league": {"round": "FAI Cup - Semi-finals"}},
+            _make_fixture(date="2025-08-01T19:45:00+00:00",
+                          round="FAI Cup - Semi-finals"),
         ]
 
         result = get_matches_for_round(matches, "")

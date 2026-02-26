@@ -1,12 +1,33 @@
 """Tests for rate limiting and retry mechanism."""
 
+import time
 import unittest
 from unittest.mock import Mock, patch
 
 import requests
 
+from models import Fixture, GoalEvent, MatchStatus, Team, Venue
 from common import extract_scorers
 from rate_limiter import APIClient, RateLimiter
+
+
+def _make_fixture(**overrides):
+    """Helper to create a Fixture with sensible defaults."""
+    defaults = dict(
+        id=1,
+        date="2025-07-18T19:45:00Z",
+        status=MatchStatus(short="2H", elapsed=67),
+        venue=Venue(name="Stadium"),
+        home=Team(id=1, name="St Patrick's Athl."),
+        away=Team(id=2, name="Shelbourne"),
+        home_goals=1,
+        away_goals=1,
+        league_id=126,
+        round="Regular Season - 15",
+        events=[],
+    )
+    defaults.update(overrides)
+    return Fixture(**defaults)
 
 
 class TestRateLimiter(unittest.TestCase):
@@ -23,8 +44,6 @@ class TestRateLimiter(unittest.TestCase):
 
     def test_wait_enforces_interval(self):
         """Test wait enforces minimum interval between calls."""
-        import time
-
         self.rate_limiter.wait()
         start = time.time()
         self.rate_limiter.wait()
@@ -159,35 +178,26 @@ class TestScorerExtraction(unittest.TestCase):
 
     def test_extract_scorers_from_fixture_with_events(self):
         """Test extract_scorers with fixture containing goal events."""
-        fixture = {
-            "teams": {
-                "home": {"name": "St Patrick's Athl."},
-                "away": {"name": "Shelbourne"},
-            },
-            "events": [
-                {
-                    "type": "Goal",
-                    "team": {"name": "St Patrick's Athl."},
-                    "player": {"name": "John Smith"},
-                    "time": {"elapsed": 25},
-                    "detail": None,
-                },
-                {
-                    "type": "Goal",
-                    "team": {"name": "Shelbourne"},
-                    "player": {"name": "Jane Doe"},
-                    "time": {"elapsed": 45},
-                    "detail": "Penalty",
-                },
-                {
-                    "type": "Card",
-                    "team": {"name": "St Patrick's Athl."},
-                    "player": {"name": "Bob Wilson"},
-                    "time": {"elapsed": 30},
-                    "detail": "Yellow Card",
-                },
+        fixture = _make_fixture(
+            events=[
+                GoalEvent(
+                    player="John Smith",
+                    team="St Patrick's Athl.",
+                    minute=25,
+                    is_home=True,
+                    is_penalty=False,
+                    is_own_goal=False,
+                ),
+                GoalEvent(
+                    player="Jane Doe",
+                    team="Shelbourne",
+                    minute=45,
+                    is_home=False,
+                    is_penalty=True,
+                    is_own_goal=False,
+                ),
             ],
-        }
+        )
 
         scorers = extract_scorers(fixture)
 
@@ -201,22 +211,20 @@ class TestScorerExtraction(unittest.TestCase):
 
     def test_extract_scorers_own_goal(self):
         """Test extract_scorers identifies own goals."""
-
-        fixture = {
-            "teams": {
-                "home": {"name": "Team A"},
-                "away": {"name": "Team B"},
-            },
-            "events": [
-                {
-                    "type": "Goal",
-                    "team": {"name": "Team A"},
-                    "player": {"name": "Own Goal Player"},
-                    "time": {"elapsed": 50},
-                    "detail": "Own Goal",
-                },
+        fixture = _make_fixture(
+            home=Team(id=1, name="Team A"),
+            away=Team(id=2, name="Team B"),
+            events=[
+                GoalEvent(
+                    player="Own Goal Player",
+                    team="Team A",
+                    minute=50,
+                    is_home=True,
+                    is_penalty=False,
+                    is_own_goal=True,
+                ),
             ],
-        }
+        )
 
         scorers = extract_scorers(fixture)
 
@@ -224,13 +232,11 @@ class TestScorerExtraction(unittest.TestCase):
 
     def test_extract_scorers_no_events(self):
         """Test extract_scorers handles fixture with no events."""
-
-        fixture = {
-            "teams": {
-                "home": {"name": "Team A"},
-                "away": {"name": "Team B"},
-            },
-        }
+        fixture = _make_fixture(
+            home=Team(id=1, name="Team A"),
+            away=Team(id=2, name="Team B"),
+            events=[],
+        )
 
         scorers = extract_scorers(fixture)
 

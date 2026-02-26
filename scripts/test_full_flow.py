@@ -18,6 +18,7 @@ from common import (
     parse_match_datetime,
     filter_weekly_matches,
     get_match_date_range,
+    get_fixture_dublin_date,
     load_cache,
     save_cache,
 )
@@ -30,7 +31,6 @@ from live_updater import (
     get_league_fixtures,
     get_league_table as get_live_table,
     build_premier_body,
-    _get_fixture_dublin_date,
 )
 
 config = MatchbotConfig()
@@ -55,8 +55,8 @@ def main():
     if not weekly_matches:
         print("   No matches this week, using next 5 upcoming for test")
         upcoming = [m for m in all_matches
-                    if parse_match_datetime(m["fixture"]["date"]).date() >= today]
-        weekly_matches = sorted(upcoming, key=lambda m: m["fixture"]["date"])[:5]
+                    if parse_match_datetime(m.date).date() >= today]
+        weekly_matches = sorted(upcoming, key=lambda m: m.date)[:5]
     print(f"   Weekly: {len(weekly_matches)} matches")
 
     # Step 3: Get date range
@@ -94,7 +94,7 @@ def main():
     print("\n6. Saving cache (common.save_cache)...")
     cache = load_cache()
     match_dates = sorted({
-        parse_match_datetime(m["fixture"]["date"]).date().isoformat()
+        parse_match_datetime(m.date).date().isoformat()
         for m in weekly_matches
     })
     cache["premier_division"] = {
@@ -118,7 +118,7 @@ def main():
     # Filter by cached match_dates using Dublin timezone
     weekly_fresh = [
         f for f in fresh_fixtures
-        if _get_fixture_dublin_date(f) in match_dates
+        if get_fixture_dublin_date(f) in match_dates
     ]
     print(f"   Filtered to {len(weekly_fresh)} weekly fixtures")
 
@@ -127,12 +127,6 @@ def main():
 
     # Build updated body using live_updater.build_premier_body
     updated_body = build_premier_body(weekly_fresh, fresh_table)
-
-    # Add marker to show update worked
-    updated_body = updated_body.replace(
-        "*Live scores will be updated during matches*",
-        "*Live scores will be updated during matches* ✅ **UPDATE SUCCESSFUL**"
-    )
 
     # Edit post
     post.edit(updated_body)

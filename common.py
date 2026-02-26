@@ -8,6 +8,8 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from typing import Dict, List, Tuple, Any
 
+from models import Fixture, Standing, Venue
+
 normalised_team_names = {
     "St Patrick's Athl.": "St. Patrick's Athletic",
     "Bohemian": "Bohemian FC",
@@ -84,23 +86,22 @@ def normalise_team_name(team_name: str) -> str:
     return team_name
 
 
-def apply_fallback_grounds(fixtures):
+def apply_fallback_grounds(fixtures: list[Fixture]):
     """Fill in missing venue names from hardcoded grounds lookup.
 
     Args:
-        fixtures: List of fixtures in api-football format
+        fixtures: List of Fixtures
 
     Returns:
         Same fixtures with missing venues populated from league_grounds
     """
     for fixture in fixtures:
-        venue = fixture.get("fixture", {}).get("venue", {}).get("name", "")
+        venue = fixture.venue.name
         if not venue or venue == "TBD":
-            home_team = normalise_team_name(
-                fixture.get("teams", {}).get("home", {}).get("name", ""))
+            home_team = normalise_team_name(fixture.home.name)
             ground = league_grounds.get(home_team, "")
             if ground:
-                fixture["fixture"]["venue"]["name"] = ground
+                fixture.venue = Venue(name=ground)
     return fixtures
 
 
@@ -119,20 +120,20 @@ def ordinal_suffix(day: int) -> str:
     return f"{day}{suffixes.get(day % 10, 'th')}"
 
 
-def get_last_matches(team_id: int, league_table: List[Dict[str, Any]]) -> str:
+def get_last_matches(team_id: int, league_table: List[Standing]) -> str:
     """Return last five match results through emojis for a team.
 
     Args:
         team_id: Team ID from API
-        league_table: League standings data
+        league_table: League standings data (list of Standings)
 
     Returns:
         String of emoji representing form (e.g., "✅⚪❌✅✅")
     """
     last_matches = 5
     team_form = next(
-        (team.get("form", "") for team in league_table
-         if team.get("team", {}).get("id") == team_id),
+        (item.form for item in league_table
+         if item.team.id == team_id),
         None
     )
     if team_form:
@@ -167,38 +168,36 @@ def parse_match_datetime(
     return match_datetime_local
 
 
-def get_fixture_dublin_date(fixture: Dict[str, Any]) -> str:
+def get_fixture_dublin_date(fixture: Fixture) -> str:
     """Get fixture date as a Dublin-local ISO date string (YYYY-MM-DD).
 
     Handles DST correctly so late UTC matches are grouped under the
     right local day.
 
     Args:
-        fixture: Fixture dictionary (outer dict containing "fixture" key)
-
+        fixture: Fixture
     Returns:
         Date string in YYYY-MM-DD format (Dublin timezone), or ""
     """
-    date_str = fixture.get("fixture", {}).get("date", "")
+    date_str = fixture.date
     if not date_str:
         return ""
     return parse_match_datetime(date_str).date().isoformat()
 
 
-def get_match_status_display(fixture: Dict[str, Any]) -> Tuple[str, str]:
+def get_match_status_display(fixture: Fixture) -> Tuple[str, str]:
     """Get display text for match status and score.
 
     Args:
-        fixture: Fixture dictionary from API-Football
-
+        fixture: Fixture
     Returns:
         Tuple of (score_display, status_display)
         Examples: ("2-1", "45'"), ("vs", "19:45"), ("1-0", "FT")
     """
-    status = fixture.get("fixture", {}).get("status", {}).get("short", "NS")
-    elapsed = fixture.get("fixture", {}).get("status", {}).get("elapsed")
-    home_score = fixture.get("goals", {}).get("home")
-    away_score = fixture.get("goals", {}).get("away")
+    status = fixture.status.short
+    elapsed = fixture.status.elapsed
+    home_score = fixture.home_goals
+    away_score = fixture.away_goals
 
     # Pre-match
     if status in ["TBD", "NS"]:
@@ -234,7 +233,7 @@ def get_match_status_display(fixture: Dict[str, Any]) -> Tuple[str, str]:
     return "vs", status
 
 
-def format_scorers_compact(fixture: Dict[str, Any]) -> str:
+def format_scorers_compact(fixture: Fixture) -> str:
     """Format goal scorers as a compact string for table column.
 
     Returns scorers in format: "Home scorers - Away scorers"
@@ -242,8 +241,7 @@ def format_scorers_compact(fixture: Dict[str, Any]) -> str:
     Groups multiple goals by the same player.
 
     Args:
-        fixture: Fixture dictionary
-
+        fixture: Fixture
     Returns:
         Compact scorer string, or empty string if no scorers
     """
@@ -282,26 +280,21 @@ def format_scorers_compact(fixture: Dict[str, Any]) -> str:
     return home_str or away_str
 
 
-def format_live_fixture(fixture: Dict[str, Any]) -> List[str]:
+def format_live_fixture(fixture: Fixture) -> List[str]:
     """Format a fixture for display in match table with live score.
 
     Args:
-        fixture: Fixture dictionary from API-Football
-
+        fixture: Fixture
     Returns:
         List: [home_team, score, away_team, venue, status, kickoff, scorers]
     """
-    home_team = normalise_team_name(
-        fixture.get("teams", {}).get("home", {}).get("name", "Unknown")
-    )
-    away_team = normalise_team_name(
-        fixture.get("teams", {}).get("away", {}).get("name", "Unknown")
-    )
-    venue = fixture.get("fixture", {}).get("venue", {}).get("name", "TBD")
+    home_team = normalise_team_name(fixture.home.name)
+    away_team = normalise_team_name(fixture.away.name)
+    venue = fixture.venue.name
     score, status = get_match_status_display(fixture)
 
     # Always include kickoff time
-    fixture_date = fixture.get("fixture", {}).get("date")
+    fixture_date = fixture.date
     if fixture_date:
         kickoff = parse_match_datetime(fixture_date).strftime("%H:%M")
     else:
@@ -335,57 +328,49 @@ def save_cache(cache_data: Dict[str, Any]) -> None:
         json.dump(cache_data, f, indent=2)
 
 
-def extract_scorers(
-        fixture: Dict[str, Any]) -> Dict[str, List[Dict[str, Any]]]:
+def extract_scorers(fixture: Fixture) -> Dict[str, List[Dict[str, Any]]]:
     """Extract goal scorers from fixture events.
 
     Args:
-        fixture: Fixture dictionary containing events
-
+        fixture: Fixture
     Returns:
         Dictionary with 'home' and 'away' lists of scorer dictionaries.
         Each scorer dict contains: {name, minute, penalty, own_goal}
     """
     scorers = {"home": [], "away": []}
 
-    if "events" not in fixture:
+    if not fixture.events:
         return scorers
 
-    for event in fixture["events"]:
-        if event.get("type") != "Goal":
-            continue
-
+    for event in fixture.events:
         scorer_info = {
-            "name": event.get("player", {}).get("name", "Unknown"),
-            "minute": event.get("time", {}).get("elapsed", 0),
-            "penalty": event.get("detail", "") == "Penalty",
-            "own_goal": event.get("detail", "") == "Own Goal",
+            "name": event.player,
+            "minute": event.minute,
+            "penalty": event.is_penalty,
+            "own_goal": event.is_own_goal,
         }
 
         # Prefer isHome flag from matchDetails (avoids name-variant mismatches)
-        is_home = event.get("isHome")
-        if is_home is not None:
-            if is_home:
+        if event.is_home is not None:
+            if event.is_home:
                 scorers["home"].append(scorer_info)
             else:
                 scorers["away"].append(scorer_info)
         else:
             # Fallback to team name comparison
-            team = event.get("team", {}).get("name")
-            home_team = fixture.get("teams", {}).get("home", {}).get("name")
-            if team and home_team and team == home_team:
+            if event.team and fixture.home.name and event.team == fixture.home.name:
                 scorers["home"].append(scorer_info)
-            elif team:
+            elif event.team:
                 scorers["away"].append(scorer_info)
 
     return scorers
 
 
-def filter_weekly_matches(all_matches, today_date):
+def filter_weekly_matches(all_matches: List[Fixture], today_date):
     """Filter matches to the current weekly window.
 
     Args:
-        all_matches: List of match fixtures from API
+        all_matches: List of Fixtures
         today_date: Today's date (datetime.date object)
 
     Returns:
@@ -396,26 +381,26 @@ def filter_weekly_matches(all_matches, today_date):
     return [
         m for m in all_matches
         if (today_date <=
-            parse_match_datetime(m["fixture"]["date"]).date() <
+            parse_match_datetime(m.date).date() <
             week_end_exclusive)
     ]
 
 
-def get_match_date_range(matches):
+def get_match_date_range(matches: List[Fixture]):
     """Get first and last match dates from list.
 
     Args:
-        matches: List of match fixtures
+        matches: List of Fixtures
 
     Returns:
         Tuple of (first_match_date, last_match_date)
     """
     first_date = min(
-        parse_match_datetime(m["fixture"]["date"]).date()
+        parse_match_datetime(m.date).date()
         for m in matches
     )
     last_date = max(
-        parse_match_datetime(m["fixture"]["date"]).date()
+        parse_match_datetime(m.date).date()
         for m in matches
     )
     return first_date, last_date

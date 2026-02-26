@@ -15,6 +15,7 @@ import praw
 import prawcore
 import requests
 
+from models import Fixture, GoalEvent, Standing, Venue
 from matchbot_config import MatchbotConfig
 from common import (
     table_headers,
@@ -33,9 +34,9 @@ from match_client import (
     LEAGUE_ID_PREMIER,
     LEAGUE_ID_FIRST,
     LEAGUE_ID_FAI_CUP,
-    convert_raw_match,
-    convert_raw_table,
-    convert_match_events,
+    to_fixture,
+    to_standing,
+    to_events,
     extract_venue_from_details,
     extract_score_from_details,
 )
@@ -54,14 +55,26 @@ _table_cache: dict[int, dict[str, Any]] = {}
 # Per-run cache for matchDetails scores (fixture_id -> (home, away))
 _score_cache: dict[int, tuple[int, int]] = {}
 
-# Per-run cache for match events/scorers (fixture_id -> events list)
-_events_cache: dict[int, list[dict[str, Any]]] = {}
+# Per-run cache for match events/scorers (fixture_id -> GoalEvent list)
+_events_cache: dict[int, list[GoalEvent]] = {}
 
 # Per-run cache of last posted body hash per post_id
 _last_body: dict[str, str] = {}
 
 # Match data client instance
 client = MatchDataClient()
+
+
+def _serialize_events(events: list[GoalEvent]) -> list[dict[str, Any]]:
+    """Convert GoalEvents to JSON-serialisable dicts."""
+    return [{"player": e.player, "team": e.team, "minute": e.minute,
+             "is_home": e.is_home, "is_penalty": e.is_penalty,
+             "is_own_goal": e.is_own_goal} for e in events]
+
+
+def _deserialize_events(raw: list[dict[str, Any]]) -> list[GoalEvent]:
+    """Convert JSON dicts back to GoalEvents."""
+    return [GoalEvent(**d) for d in raw]
 
 
 def _compute_body_hash(body: str) -> str:
@@ -83,7 +96,7 @@ def _persist_body_hash(post_id: str, body_hash: str) -> None:
         logger.warning("Could not persist body hash for post %s: %s", post_id, exc)
 
 
-def _persist_events(fixture_id: int, events: list[dict[str, Any]]) -> None:
+def _persist_events(fixture_id: int, events: list[GoalEvent]) -> None:
     """Save match events to file cache so they survive across runs."""
     try:
         cache = load_cache()
@@ -91,18 +104,19 @@ def _persist_events(fixture_id: int, events: list[dict[str, Any]]) -> None:
         if not isinstance(match_events, dict):
             match_events = {}
             cache["_match_events"] = match_events
-        match_events[str(fixture_id)] = events
+        match_events[str(fixture_id)] = _serialize_events(events)
         save_cache(cache)
     except Exception as exc:  # pylint: disable=broad-exception-caught
         logger.warning("Could not persist events for fixture %s: %s", fixture_id, exc)
 
 
-def _load_persisted_events(fixture_id: int) -> list[dict[str, Any]]:
+def _load_persisted_events(fixture_id: int) -> list[GoalEvent]:
     """Load match events from file cache."""
     try:
         cache = load_cache()
         match_events = cache.get("_match_events", {})
-        return match_events.get(str(fixture_id), [])
+        persisted_list = match_events.get(str(fixture_id), [])
+        return _deserialize_events(persisted_list)
     except Exception:  # pylint: disable=broad-exception-caught
         return []
 
@@ -110,7 +124,7 @@ def _load_persisted_events(fixture_id: int) -> list[dict[str, Any]]:
 def _fetch_match_details(
     match_id: str,
     page_url: str = "",
-) -> tuple[list[dict[str, Any]], str, tuple[Any, Any]]:
+) -> tuple[list[GoalEvent], str, tuple[Any, Any]]:
     """Fetch events, venue, and scores for a specific match.
 
     Args:
@@ -118,12 +132,12 @@ def _fetch_match_details(
         page_url: Optional page URL slug for page-based fetching
 
     Returns:
-        Tuple of (events list, venue name, (home_score, away_score))
+        Tuple of (GoalEvent list, venue name, (home_score, away_score))
     """
     try:
         details = client.get_match_details(int(match_id), page_url=page_url)
         if details:
-            events = convert_match_events(details)
+            events = to_events(details)
             venue = extract_venue_from_details(details)
             scores = extract_score_from_details(details)
             return events, venue, scores
@@ -135,7 +149,7 @@ def _fetch_match_details(
 def get_live_fixtures(
     league_ids: list[int],
     match_dates: set[str] | None = None,
-) -> list[dict[str, Any]]:
+) -> list[Fixture]:
     """
     Fetch live and recently-finished fixtures for multiple leagues.
 
@@ -149,9 +163,8 @@ def get_live_fixtures(
             scope finished-match inclusion
 
     Returns:
-        List of fixture dictionaries in api-football compatible format
-    """
-    all_fixtures = []
+        List of Fixture    """
+    all_fixtures: list[Fixture] = []
 
     for league_id in league_ids:
         try:
@@ -164,7 +177,7 @@ def get_live_fixtures(
                     continue
 
                 match["_league_id"] = league_id
-                converted = convert_raw_match(match)
+                converted = to_fixture(match)
 
                 # Skip finished matches outside the tracked date range
                 if status.get("finished"):
@@ -175,23 +188,21 @@ def get_live_fixtures(
 
                 match_id = match.get("id")
                 if match_id:
-                    page_url = match.get("pageUrl", "")
                     events, venue, scores = _fetch_match_details(
-                        match_id, page_url=page_url
+                        match_id, page_url=match.get("pageUrl", "")
                     )
-                    converted["events"] = events
+                    converted.events = events
                     if events:
-                        fid = converted["fixture"]["id"]
-                        _events_cache[fid] = events
-                        _persist_events(fid, events)
+                        _events_cache[converted.id] = events
+                        _persist_events(converted.id, events)
                     if venue:
-                        converted["fixture"]["venue"]["name"] = venue
+                        converted.venue = Venue(name=venue)
                     home_score, away_score = scores
-                    if converted["goals"]["home"] is None and home_score is not None:
-                        converted["goals"]["home"] = home_score
-                        converted["goals"]["away"] = away_score
+                    if converted.home_goals is None and home_score is not None:
+                        converted.home_goals = home_score
+                        converted.away_goals = away_score
                     if home_score is not None:
-                        _score_cache[converted["fixture"]["id"]] = (
+                        _score_cache[converted.id] = (
                             home_score, away_score
                         )
 
@@ -203,7 +214,7 @@ def get_live_fixtures(
     return apply_fallback_grounds(all_fixtures)
 
 
-def get_league_fixtures(league_id: int) -> list[dict[str, Any]]:
+def get_league_fixtures(league_id: int) -> list[Fixture]:
     """
     Fetch all fixtures for a league.
 
@@ -211,9 +222,9 @@ def get_league_fixtures(league_id: int) -> list[dict[str, Any]]:
         league_id: League ID
 
     Returns:
-        List of fixture dictionaries in api-football compatible format (deduplicated)
+        List of Fixtures (deduplicated)
     """
-    fixtures_by_id: dict[Any, dict[str, Any]] = {}
+    fixtures_by_id: dict[Any, Fixture] = {}
 
     try:
         for tab in ["fixtures", "results"]:
@@ -222,8 +233,8 @@ def get_league_fixtures(league_id: int) -> list[dict[str, Any]]:
 
             for match in matches:
                 match["_league_id"] = league_id
-                converted = convert_raw_match(match)
-                fixture_id = converted.get("fixture", {}).get("id")
+                converted = to_fixture(match)
+                fixture_id = converted.id
                 if not fixture_id:
                     logger.warning("Fixture missing ID, skipping dedupe")
                     fixtures_by_id[id(converted)] = converted
@@ -236,7 +247,7 @@ def get_league_fixtures(league_id: int) -> list[dict[str, Any]]:
     return apply_fallback_grounds(list(fixtures_by_id.values()))
 
 
-def get_league_table(league_id: int) -> list[dict[str, Any]]:
+def get_league_table(league_id: int) -> list[Standing]:
     """Return league table for a specific league with caching.
 
     Tables are cached for 30 minutes as they only change after matches finish.
@@ -245,8 +256,7 @@ def get_league_table(league_id: int) -> list[dict[str, Any]]:
         league_id: League ID (126=Premier, 218=First)
 
     Returns:
-        List of team standings dictionaries in api-football format
-    """
+        List of Standing    """
     now = time.time()
 
     if league_id in _table_cache:
@@ -267,7 +277,7 @@ def get_league_table(league_id: int) -> list[dict[str, Any]]:
             return _table_cache[league_id]["data"]
         return []
 
-    table_data = convert_raw_table(raw_table)
+    table_data = [to_standing(row) for row in raw_table]
 
     _table_cache[league_id] = {
         "data": table_data,
@@ -298,31 +308,34 @@ def _format_match_date_section(date_str, matches_list):
     return section
 
 
-def build_premier_body(matches_data, league_table):
+def build_premier_body(
+    matches_data: list[Fixture],
+    league_table: list[Standing],
+) -> str:
     """Build the body text for Premier Division post."""
-    matches_by_date = {}
+    matches_by_date: dict[str, list[Fixture]] = {}
     for match in matches_data:
         date = get_fixture_dublin_date(match)
         matches_by_date.setdefault(date, []).append(match)
 
-    body = "*Live scores and league table will be updated during matches*\n\n"
+    body = "*Live scores will be updated during matches*\n\n"
 
     for date, matches_list in sorted(matches_by_date.items()):
         body += _format_match_date_section(date, matches_list)
 
     table_data = [
         [
-            item["rank"],
-            normalise_team_name(item["team"]["name"]),
-            item["all"]["played"],
-            item["all"]["win"],
-            item["all"]["draw"],
-            item["all"]["lose"],
-            item["all"]["goals"]["for"],
-            item["all"]["goals"]["against"],
-            item["goalsDiff"],
-            item["points"],
-            get_last_matches(item["team"]["id"], league_table),
+            item.rank,
+            normalise_team_name(item.team.name),
+            item.played,
+            item.won,
+            item.drawn,
+            item.lost,
+            item.goals_for,
+            item.goals_against,
+            item.goal_diff,
+            item.points,
+            get_last_matches(item.team.id, league_table),
         ]
         for item in league_table
     ]
@@ -347,31 +360,34 @@ def build_premier_body(matches_data, league_table):
     return body
 
 
-def build_first_body(matches_data, league_table):
+def build_first_body(
+    matches_data: list[Fixture],
+    league_table: list[Standing],
+) -> str:
     """Build the body text for First Division post."""
-    matches_by_date = {}
+    matches_by_date: dict[str, list[Fixture]] = {}
     for match in matches_data:
         date = get_fixture_dublin_date(match)
         matches_by_date.setdefault(date, []).append(match)
 
-    body = "*Live scores and league table will be updated during matches*\n\n"
+    body = "*Live scores will be updated during matches*\n\n"
 
     for date, matches_list in sorted(matches_by_date.items()):
         body += _format_match_date_section(date, matches_list)
 
     table_data = [
         [
-            item["rank"],
-            normalise_team_name(item["team"]["name"]),
-            item["all"]["played"],
-            item["all"]["win"],
-            item["all"]["draw"],
-            item["all"]["lose"],
-            item["all"]["goals"]["for"],
-            item["all"]["goals"]["against"],
-            item["goalsDiff"],
-            item["points"],
-            get_last_matches(item["team"]["id"], league_table),
+            item.rank,
+            normalise_team_name(item.team.name),
+            item.played,
+            item.won,
+            item.drawn,
+            item.lost,
+            item.goals_for,
+            item.goals_against,
+            item.goal_diff,
+            item.points,
+            get_last_matches(item.team.id, league_table),
         ]
         for item in league_table
     ]
@@ -396,15 +412,15 @@ def build_first_body(matches_data, league_table):
     return body
 
 
-def build_cup_body(matches_data, current_round):
+def build_cup_body(matches_data: list[Fixture], current_round: str) -> str:
     """Build the body text for FAI Cup post."""
-    matches_by_date = {}
+    matches_by_date: dict[str, list[Fixture]] = {}
     for match in matches_data:
         date = get_fixture_dublin_date(match)
         matches_by_date.setdefault(date, []).append(match)
 
     body = (
-        f"*Live scores and league table will be updated during matches*\n\n"
+        f"*Live scores will be updated during matches*\n\n"
         f"## {current_round}\n\n"
     )
 
@@ -491,40 +507,38 @@ def update_reddit_post(post_id: str, new_body: str) -> bool:
         return False
 
 
-def _enrich_fixture(fixture: dict[str, Any]) -> None:
+def _enrich_fixture(fixture: Fixture) -> None:
     """Fill in missing scores and events from matchDetails.
 
     Makes a single API call to fetch both, using per-run caches to
     avoid redundant requests.
     """
-    status_short = fixture.get("fixture", {}).get("status", {}).get("short", "NS")
-    if status_short in ("TBD", "NS"):
+    if fixture.status.short in ("TBD", "NS"):
         return
 
-    fixture_id = fixture.get("fixture", {}).get("id")
+    fixture_id = fixture.id
     if not fixture_id:
         return
 
-    goals = fixture.get("goals", {})
-    needs_scores = goals.get("home") is None
-    needs_events = not fixture.get("events")
+    needs_scores = fixture.home_goals is None
+    needs_events = not fixture.events
 
     # Satisfy from caches first
     if needs_scores and fixture_id in _score_cache:
         home, away = _score_cache[fixture_id]
-        fixture["goals"]["home"] = home
-        fixture["goals"]["away"] = away
+        fixture.home_goals = home
+        fixture.away_goals = away
         needs_scores = False
 
     if needs_events and fixture_id in _events_cache:
-        fixture["events"] = _events_cache[fixture_id]
+        fixture.events = _events_cache[fixture_id]
         needs_events = False
 
     # Check persisted file cache for events saved during live play
     if needs_events:
         persisted = _load_persisted_events(fixture_id)
         if persisted:
-            fixture["events"] = persisted
+            fixture.events = persisted
             _events_cache[fixture_id] = persisted
             needs_events = False
 
@@ -532,7 +546,7 @@ def _enrich_fixture(fixture: dict[str, Any]) -> None:
         return
 
     # Single API call for whatever is still missing
-    page_url = fixture.get("_page_url", "")
+    page_url = fixture.page_url
     details = client.get_match_details(fixture_id, page_url=page_url)
     if not details:
         return
@@ -540,14 +554,14 @@ def _enrich_fixture(fixture: dict[str, Any]) -> None:
     if needs_scores:
         home_score, away_score = extract_score_from_details(details)
         if home_score is not None:
-            fixture["goals"]["home"] = home_score
-            fixture["goals"]["away"] = away_score
+            fixture.home_goals = home_score
+            fixture.away_goals = away_score
             _score_cache[fixture_id] = (home_score, away_score)
 
     if needs_events:
-        events = convert_match_events(details)
+        events = to_events(details)
         if events:
-            fixture["events"] = events
+            fixture.events = events
             _events_cache[fixture_id] = events
             _persist_events(fixture_id, events)
 
@@ -555,17 +569,17 @@ def _enrich_fixture(fixture: dict[str, Any]) -> None:
 def _get_weekly_fixtures_with_live_scores(
         league_id: int,
         match_dates: list[str],
-        live_fixtures: list[dict[str, Any]]
-) -> list[dict[str, Any]]:
+        live_fixtures: list[Fixture]
+) -> list[Fixture]:
     """Fetch all fixtures for cached match dates and merge in live scores.
 
     Args:
         league_id: League ID to fetch
         match_dates: List of match dates from cache (ISO format, Dublin timezone)
-        live_fixtures: List of currently live fixtures with events
+        live_fixtures: List of currently live Fixtures with events
 
     Returns:
-        List of all fixtures for the week with live data merged in
+        List of all Fixtures for the week with live data merged in
     """
     all_fixtures = get_league_fixtures(league_id)
 
@@ -575,14 +589,14 @@ def _get_weekly_fixtures_with_live_scores(
     ]
 
     live_by_id = {
-        f.get("fixture", {}).get("id"): f for f in live_fixtures
+        f.id: f for f in live_fixtures
     }
 
-    merged_live_ids = set()
+    merged_live_ids: set[int] = set()
 
-    merged = []
+    merged: list[Fixture] = []
     for fixture in weekly_fixtures:
-        fixture_id = fixture.get("fixture", {}).get("id")
+        fixture_id = fixture.id
         if fixture_id in live_by_id:
             merged.append(live_by_id[fixture_id])
             merged_live_ids.add(fixture_id)
@@ -607,7 +621,7 @@ def _get_weekly_fixtures_with_live_scores(
 def update_league_thread(
         competition_name: str,
         cache_data: dict[str, Any],
-        live_fixtures: list[dict[str, Any]],
+        live_fixtures: list[Fixture],
         league_id: int,
 ) -> None:
     """Update a league thread with live scores and standings.
@@ -615,7 +629,7 @@ def update_league_thread(
     Args:
         competition_name: Name of competition ("premier_division", etc.)
         cache_data: Cached data for this competition
-        live_fixtures: List of currently live fixtures for this league
+        live_fixtures: List of currently live Fixtures for this league
         league_id: League ID
     """
     comp_display = competition_name.replace('_', ' ').title()
@@ -655,9 +669,8 @@ def _get_todays_fixtures(today, league_ids):
         league_ids: List of league IDs to check
 
     Returns:
-        List of today's fixtures
-    """
-    todays_fixtures = []
+        List of today's Fixture    """
+    todays_fixtures: list[Fixture] = []
     today_str = today.isoformat()
 
     for league_id in league_ids:
@@ -693,7 +706,7 @@ def _cleanup_finished_match_day(cache, today, competitions_today):
             continue
 
         all_finished = all(
-            f.get("fixture", {}).get("status", {}).get("short") in finished_statuses
+            f.status.short in finished_statuses
             for f in todays_fixtures
         )
         if not all_finished:
@@ -730,7 +743,7 @@ def main():
     }
 
     today_str = today.isoformat()
-    competitions_today = {}
+    competitions_today: dict[str, int] = {}
     for comp_name, league_id in competition_map.items():
         comp_cache = cache.get(comp_name, {})
         if today_str in comp_cache.get("match_dates", []):
@@ -752,9 +765,9 @@ def main():
     if live_fixtures:
         logger.info("Found %d active fixtures", len(live_fixtures))
 
-    fixtures_by_league = {league_id: [] for league_id in league_ids}
+    fixtures_by_league: dict[int, list[Fixture]] = {league_id: [] for league_id in league_ids}
     for fixture in live_fixtures:
-        league_id = fixture["league"]["id"]
+        league_id = fixture.league_id
         if league_id in fixtures_by_league:
             fixtures_by_league[league_id].append(fixture)
 

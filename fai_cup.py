@@ -21,7 +21,7 @@ from common import (
 from match_client import (
     MatchDataClient,
     LEAGUE_ID_FAI_CUP,
-    convert_raw_match,
+    to_fixture,
 )
 
 config = MatchbotConfig()
@@ -48,10 +48,10 @@ def get_current_round(matches):
     now = datetime.now(ZoneInfo("UTC"))
 
     # Find the next upcoming match to get the current round
-    for match in sorted(matches, key=lambda m: m["fixture"]["date"]):
-        match_date = parse_match_datetime(match["fixture"]["date"])
+    for match in sorted(matches, key=lambda m: m.date):
+        match_date = parse_match_datetime(match.date)
         if match_date >= now:
-            round_info = match.get("league", {}).get("round", "")
+            round_info = match.round
             if round_info:
                 # Extract just the round name (e.g., "Quarter-finals")
                 if " - " in round_info:
@@ -63,8 +63,8 @@ def get_current_round(matches):
 
     # Fallback: use the last match's round (by date)
     if matches:
-        latest_match = sorted(matches, key=lambda m: m["fixture"]["date"])[-1]
-        round_info = latest_match.get("league", {}).get("round", "FAI Cup")
+        latest_match = sorted(matches, key=lambda m: m.date)[-1]
+        round_info = latest_match.round or "FAI Cup"
         if " - " in round_info:
             extracted = round_info.split(" - ")[-1]
             if extracted:
@@ -87,8 +87,8 @@ def get_matches_for_cup():
         data = client.get_league_matches(LEAGUE_ID_FAI_CUP, tab=tab)
         for match in client.extract_matches(data):
             match["_league_id"] = LEAGUE_ID_FAI_CUP
-            converted = convert_raw_match(match)
-            fixture_id = converted["fixture"]["id"]
+            converted = to_fixture(match)
+            fixture_id = converted.id
             # Results tab has more accurate data for finished matches
             if fixture_id not in fixtures_by_id or tab == "results":
                 fixtures_by_id[fixture_id] = converted
@@ -148,7 +148,7 @@ def get_matches_for_round(matches, current_round):
     current_round_key = _normalise_round_key(current_round)
     return [
         m for m in matches
-        if _normalise_round_key(m.get("league", {}).get("round", ""))
+        if _normalise_round_key(m.round)
         == current_round_key
     ]
 
@@ -230,7 +230,7 @@ def main():
             print(f"No matches found for round: {current_round_display}")
             return
 
-        round_matches.sort(key=lambda m: m["fixture"]["date"])
+        round_matches.sort(key=lambda m: m.date)
         first_match_date = get_fixture_dublin_date(round_matches[0])
         if first_match_date != today.isoformat():
             print(f"First match is on {first_match_date}, not today. Exiting.")
@@ -248,7 +248,7 @@ def main():
         # Save post metadata to cache for live updater
         cache = load_cache()
         match_dates = sorted({
-            parse_match_datetime(m["fixture"]["date"]).date().isoformat()
+            parse_match_datetime(m.date).date().isoformat()
             for m in round_matches
         })
 

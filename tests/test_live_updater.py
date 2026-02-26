@@ -5,6 +5,42 @@ import unittest
 from unittest.mock import patch, Mock
 from datetime import date
 
+from models import Fixture, GoalEvent, MatchStatus, Standing, Team, Venue
+
+
+def _make_fixture(
+    fixture_id=0,
+    status_short="NS",
+    elapsed=None,
+    date_str="2024-10-19T19:45:00+00:00",
+    venue_name="TBD",
+    home_name="Home",
+    home_id=0,
+    away_name="Away",
+    away_id=0,
+    home_goals=None,
+    away_goals=None,
+    league_id=0,
+    round_str="Regular Season - 1",
+    events=None,
+    page_url="",
+):
+    """Helper to build a Fixture for tests."""
+    return Fixture(
+        id=fixture_id,
+        date=date_str,
+        status=MatchStatus(short=status_short, elapsed=elapsed),
+        venue=Venue(name=venue_name),
+        home=Team(id=home_id, name=home_name),
+        away=Team(id=away_id, name=away_name),
+        home_goals=home_goals,
+        away_goals=away_goals,
+        league_id=league_id,
+        round=round_str,
+        events=events or [],
+        page_url=page_url,
+    )
+
 
 class TestLiveUpdaterLogic(unittest.TestCase):
     """Test live updater core logic."""
@@ -13,34 +49,34 @@ class TestLiveUpdaterLogic(unittest.TestCase):
         """Set up test fixtures - St Patrick's Athletic vs Shelbourne."""
         # League IDs: Premier=126, First=218, FAI Cup=219
         self.sample_fixtures = [
-            {
-                "fixture": {
-                    "id": 1,
-                    "status": {"short": "1H", "elapsed": 23},
-                    "date": "2024-10-19T19:45:00+00:00",
-                    "venue": {"name": "Richmond Park"},
-                },
-                "league": {"id": 126},  # Premier Division
-                "goals": {"home": 2, "away": 0},  # St Pats leading
-                "teams": {
-                    "home": {"name": "St Patrick's Athletic", "id": 1},
-                    "away": {"name": "Shelbourne", "id": 2},
-                },
-            },
-            {
-                "fixture": {
-                    "id": 2,
-                    "status": {"short": "FT", "elapsed": 90},
-                    "date": "2024-10-19T15:00:00+00:00",
-                    "venue": {"name": "Richmond Park"},
-                },
-                "league": {"id": 218},  # First Division
-                "goals": {"home": 3, "away": 0},
-                "teams": {
-                    "home": {"name": "St Patrick's Athletic", "id": 3},
-                    "away": {"name": "Shelbourne", "id": 4},
-                },
-            },
+            _make_fixture(
+                fixture_id=1,
+                status_short="1H",
+                elapsed=23,
+                date_str="2024-10-19T19:45:00+00:00",
+                venue_name="Richmond Park",
+                home_name="St Patrick's Athletic",
+                home_id=1,
+                away_name="Shelbourne",
+                away_id=2,
+                home_goals=2,
+                away_goals=0,
+                league_id=126,
+            ),
+            _make_fixture(
+                fixture_id=2,
+                status_short="FT",
+                elapsed=90,
+                date_str="2024-10-19T15:00:00+00:00",
+                venue_name="Richmond Park",
+                home_name="St Patrick's Athletic",
+                home_id=3,
+                away_name="Shelbourne",
+                away_id=4,
+                home_goals=3,
+                away_goals=0,
+                league_id=218,
+            ),
         ]
 
     def test_organize_fixtures_by_league(self):
@@ -49,7 +85,7 @@ class TestLiveUpdaterLogic(unittest.TestCase):
         fixtures_by_league = {126: [], 218: [], 219: []}
 
         for fixture in self.sample_fixtures:
-            league_id = fixture["league"]["id"]
+            league_id = fixture.league_id
             if league_id in fixtures_by_league:
                 fixtures_by_league[league_id].append(fixture)
 
@@ -60,14 +96,14 @@ class TestLiveUpdaterLogic(unittest.TestCase):
     def test_check_if_all_matches_finished(self):
         """Test checking if all matches are finished."""
         all_finished = all(
-            f["fixture"]["status"]["short"] == "FT"
+            f.status.short == "FT"
             for f in self.sample_fixtures
         )
         self.assertFalse(all_finished)  # One is 1H
 
-        self.sample_fixtures[0]["fixture"]["status"]["short"] = "FT"
+        self.sample_fixtures[0].status.short = "FT"
         all_finished = all(
-            f["fixture"]["status"]["short"] == "FT"
+            f.status.short == "FT"
             for f in self.sample_fixtures
         )
         self.assertTrue(all_finished)
@@ -121,7 +157,21 @@ class TestLiveUpdaterLogic(unittest.TestCase):
         import live_updater
 
         league_id = 126
-        stale_table = [{"rank": 1, "team": {"id": 1, "name": "Team A"}}]
+        stale_table = [
+            Standing(
+                rank=1,
+                team=Team(id=1, name="Team A"),
+                played=0,
+                won=0,
+                drawn=0,
+                lost=0,
+                goals_for=0,
+                goals_against=0,
+                goal_diff=0,
+                points=0,
+                form="",
+            )
+        ]
 
         live_updater._table_cache.clear()
         live_updater._table_cache[league_id] = {
@@ -197,20 +247,20 @@ class TestLiveUpdaterIntegration(unittest.TestCase):
             }
         }
 
-        mock_fixture = {
-            "fixture": {
-                "id": 1,
-                "status": {"short": "2H", "elapsed": 67},
-                "date": "2025-10-20T18:45:00+00:00",
-                "venue": {"name": "Richmond Park"},
-            },
-            "league": {"id": 126},  # Premier Division
-            "goals": {"home": 2, "away": 1},
-            "teams": {
-                "home": {"name": "St Patrick's Athl.", "id": 1},
-                "away": {"name": "Shelbourne", "id": 2},
-            },
-        }
+        mock_fixture = _make_fixture(
+            fixture_id=1,
+            status_short="2H",
+            elapsed=67,
+            date_str="2025-10-20T18:45:00+00:00",
+            venue_name="Richmond Park",
+            home_name="St Patrick's Athl.",
+            home_id=1,
+            away_name="Shelbourne",
+            away_id=2,
+            home_goals=2,
+            away_goals=1,
+            league_id=126,
+        )
 
         mock_get_fixtures.return_value = [mock_fixture]
         mock_get_table.return_value = []
@@ -250,52 +300,51 @@ class TestLiveUpdaterIntegration(unittest.TestCase):
 
         # League IDs: Premier=126, First=218, FAI Cup=219
         fixtures = [
-            {
-                "fixture": {
-                    "status": {"short": "1H", "elapsed": 23},
-                    "date": f"{today}T19:45:00+00:00",
-                    "venue": {"name": "Richmond Park"},
-                },
-                "league": {"id": 126},  # Premier Division
-                "goals": {"home": 2, "away": 0},
-                "teams": {
-                    "home": {"name": "St Patrick's Athletic", "id": 1},
-                    "away": {"name": "Shelbourne", "id": 2},
-                },
-            },
-            {
-                "fixture": {
-                    "status": {"short": "HT", "elapsed": None},
-                    "date": f"{today}T15:00:00+00:00",
-                    "venue": {"name": "Richmond Park"},
-                },
-                "league": {"id": 218},  # First Division
-                "goals": {"home": 1, "away": 0},
-                "teams": {
-                    "home": {"name": "St Patrick's Athletic", "id": 3},
-                    "away": {"name": "Shelbourne", "id": 4},
-                },
-            },
-            {
-                "fixture": {
-                    "status": {"short": "2H", "elapsed": 67},
-                    "date": f"{today}T20:00:00+00:00",
-                    "venue": {"name": "Richmond Park"},
-                },
-                "league": {"id": 219},  # FAI Cup
-                "goals": {"home": 3, "away": 1},
-                "teams": {
-                    "home": {"name": "St Patrick's Athletic", "id": 5},
-                    "away": {"name": "Shelbourne", "id": 6},
-                },
-            },
+            _make_fixture(
+                status_short="1H",
+                elapsed=23,
+                date_str=f"{today}T19:45:00+00:00",
+                venue_name="Richmond Park",
+                home_name="St Patrick's Athletic",
+                home_id=1,
+                away_name="Shelbourne",
+                away_id=2,
+                home_goals=2,
+                away_goals=0,
+                league_id=126,
+            ),
+            _make_fixture(
+                status_short="HT",
+                date_str=f"{today}T15:00:00+00:00",
+                venue_name="Richmond Park",
+                home_name="St Patrick's Athletic",
+                home_id=3,
+                away_name="Shelbourne",
+                away_id=4,
+                home_goals=1,
+                away_goals=0,
+                league_id=218,
+            ),
+            _make_fixture(
+                status_short="2H",
+                elapsed=67,
+                date_str=f"{today}T20:00:00+00:00",
+                venue_name="Richmond Park",
+                home_name="St Patrick's Athletic",
+                home_id=5,
+                away_name="Shelbourne",
+                away_id=6,
+                home_goals=3,
+                away_goals=1,
+                league_id=219,
+            ),
         ]
 
         mock_get_fixtures.return_value = fixtures
 
         fixtures_by_league = {126: [], 218: [], 219: []}
         for fixture in fixtures:
-            league_id = fixture["league"]["id"]
+            league_id = fixture.league_id
             if league_id in fixtures_by_league:
                 fixtures_by_league[league_id].append(fixture)
 
@@ -328,20 +377,16 @@ class TestCleanupFinishedMatchDay(unittest.TestCase):
 
         # All matches finished (FT)
         mock_get_fixtures.return_value = [
-            {
-                "fixture": {
-                    "date": f"{today_str}T19:45:00+00:00",
-                    "status": {"short": "FT"},
-                },
-                "league": {"id": 126},
-            },
-            {
-                "fixture": {
-                    "date": f"{today_str}T19:45:00+00:00",
-                    "status": {"short": "FT"},
-                },
-                "league": {"id": 126},
-            },
+            _make_fixture(
+                date_str=f"{today_str}T19:45:00+00:00",
+                status_short="FT",
+                league_id=126,
+            ),
+            _make_fixture(
+                date_str=f"{today_str}T19:45:00+00:00",
+                status_short="FT",
+                league_id=126,
+            ),
         ]
 
         _cleanup_finished_match_day(cache, today, {"premier_division": 126})
@@ -373,13 +418,11 @@ class TestCleanupFinishedMatchDay(unittest.TestCase):
 
         # Matches not started (NS)
         mock_get_fixtures.return_value = [
-            {
-                "fixture": {
-                    "date": f"{today_str}T19:45:00+00:00",
-                    "status": {"short": "NS"},
-                },
-                "league": {"id": 126},
-            },
+            _make_fixture(
+                date_str=f"{today_str}T19:45:00+00:00",
+                status_short="NS",
+                league_id=126,
+            ),
         ]
 
         _cleanup_finished_match_day(cache, today, {"premier_division": 126})
@@ -409,20 +452,16 @@ class TestCleanupFinishedMatchDay(unittest.TestCase):
 
         # Mixed: one finished, one in progress
         mock_get_fixtures.return_value = [
-            {
-                "fixture": {
-                    "date": f"{today_str}T19:45:00+00:00",
-                    "status": {"short": "FT"},
-                },
-                "league": {"id": 126},
-            },
-            {
-                "fixture": {
-                    "date": f"{today_str}T20:00:00+00:00",
-                    "status": {"short": "2H"},
-                },
-                "league": {"id": 126},
-            },
+            _make_fixture(
+                date_str=f"{today_str}T19:45:00+00:00",
+                status_short="FT",
+                league_id=126,
+            ),
+            _make_fixture(
+                date_str=f"{today_str}T20:00:00+00:00",
+                status_short="2H",
+                league_id=126,
+            ),
         ]
 
         _cleanup_finished_match_day(cache, today, {"premier_division": 126})
@@ -456,20 +495,16 @@ class TestCleanupFinishedMatchDay(unittest.TestCase):
 
         # One finished, one not started - must NOT clean up
         mock_get_fixtures.return_value = [
-            {
-                "fixture": {
-                    "date": f"{today_str}T15:00:00+00:00",
-                    "status": {"short": "FT"},
-                },
-                "league": {"id": 126},
-            },
-            {
-                "fixture": {
-                    "date": f"{today_str}T19:45:00+00:00",
-                    "status": {"short": "NS"},
-                },
-                "league": {"id": 126},
-            },
+            _make_fixture(
+                date_str=f"{today_str}T15:00:00+00:00",
+                status_short="FT",
+                league_id=126,
+            ),
+            _make_fixture(
+                date_str=f"{today_str}T19:45:00+00:00",
+                status_short="NS",
+                league_id=126,
+            ),
         ]
 
         _cleanup_finished_match_day(cache, today, {"premier_division": 126})
@@ -488,16 +523,16 @@ class TestCleanupFinishedMatchDay(unittest.TestCase):
         today_str = today.isoformat()
 
         mock_get_fixtures.return_value = [
-            {"fixture": {"date": f"{today_str}T19:45:00+00:00"}},
-            {"fixture": {"date": "2026-02-07T19:45:00+00:00"}},
-            {"fixture": {"date": f"{today_str}T20:00:00+00:00"}},
+            _make_fixture(date_str=f"{today_str}T19:45:00+00:00"),
+            _make_fixture(date_str="2026-02-07T19:45:00+00:00"),
+            _make_fixture(date_str=f"{today_str}T20:00:00+00:00"),
         ]
 
         result = _get_todays_fixtures(today, [126])
 
         self.assertEqual(len(result), 2)
         for fixture in result:
-            self.assertTrue(fixture["fixture"]["date"].startswith(today_str))
+            self.assertTrue(fixture.date.startswith(today_str))
 
     @patch("live_updater.save_cache")
     @patch("live_updater.get_league_fixtures")
@@ -516,12 +551,10 @@ class TestCleanupFinishedMatchDay(unittest.TestCase):
         }
 
         mock_get_fixtures.return_value = [
-            {
-                "fixture": {
-                    "date": f"{today_str}T19:45:00+00:00",
-                    "status": {"short": "FT"},
-                }
-            }
+            _make_fixture(
+                date_str=f"{today_str}T19:45:00+00:00",
+                status_short="FT",
+            ),
         ]
 
         _cleanup_finished_match_day(cache, today, {"premier_division": 126})
@@ -551,20 +584,16 @@ class TestCleanupFinishedMatchDay(unittest.TestCase):
         def _fixtures_for_league(league_id):
             if league_id == 126:
                 return [
-                    {
-                        "fixture": {
-                            "date": f"{today_str}T19:45:00+00:00",
-                            "status": {"short": "FT"},
-                        }
-                    }
+                    _make_fixture(
+                        date_str=f"{today_str}T19:45:00+00:00",
+                        status_short="FT",
+                    ),
                 ]
             return [
-                {
-                    "fixture": {
-                        "date": f"{today_str}T19:45:00+00:00",
-                        "status": {"short": "NS"},
-                    }
-                }
+                _make_fixture(
+                    date_str=f"{today_str}T19:45:00+00:00",
+                    status_short="NS",
+                ),
             ]
 
         mock_get_fixtures.side_effect = _fixtures_for_league
@@ -620,21 +649,17 @@ class TestUpdateLeagueThreadGuards(unittest.TestCase):
 
         cache_data = {"post_id": "prem123", "match_dates": ["2026-02-11"]}
         mock_weekly_fixtures.return_value = [
-            {
-                "fixture": {
-                    "id": 1,
-                    "status": {"short": "NS", "elapsed": None},
-                    "date": "2026-02-11T19:45:00+00:00",
-                    "venue": {"name": "Stadium"},
-                },
-                "league": {"id": 126},
-                "goals": {"home": None, "away": None},
-                "teams": {
-                    "home": {"name": "Team A", "id": 1},
-                    "away": {"name": "Team B", "id": 2},
-                },
-                "events": [],
-            }
+            _make_fixture(
+                fixture_id=1,
+                status_short="NS",
+                date_str="2026-02-11T19:45:00+00:00",
+                venue_name="Stadium",
+                home_name="Team A",
+                home_id=1,
+                away_name="Team B",
+                away_id=2,
+                league_id=126,
+            ),
         ]
         mock_get_table.return_value = []
 
@@ -754,20 +779,20 @@ class TestLiveUpdaterErrorHandling(unittest.TestCase):
         }
 
         mock_get_fixtures.return_value = [
-            {
-                "fixture": {
-                    "id": 111,
-                    "status": {"short": "1H", "elapsed": 23},
-                    "date": f"{today}T19:45:00+00:00",
-                    "venue": {"name": "Richmond Park"},
-                },
-                "league": {"id": 126},
-                "goals": {"home": 1, "away": 0},
-                "teams": {
-                    "home": {"name": "St Patrick's Athletic", "id": 1},
-                    "away": {"name": "Shelbourne", "id": 2},
-                },
-            }
+            _make_fixture(
+                fixture_id=111,
+                status_short="1H",
+                elapsed=23,
+                date_str=f"{today}T19:45:00+00:00",
+                venue_name="Richmond Park",
+                home_name="St Patrick's Athletic",
+                home_id=1,
+                away_name="Shelbourne",
+                away_id=2,
+                home_goals=1,
+                away_goals=0,
+                league_id=126,
+            ),
         ]
 
         from live_updater import main
@@ -816,32 +841,31 @@ class TestLiveUpdaterErrorHandling(unittest.TestCase):
 
         # League IDs: Premier=126, First=218
         fixtures = [
-            {
-                "fixture": {
-                    "status": {"short": "1H", "elapsed": 23},
-                    "date": f"{today}T19:45:00+00:00",
-                    "venue": {"name": "Richmond Park"},
-                },
-                "league": {"id": 126},  # Premier Division
-                "goals": {"home": 2, "away": 0},
-                "teams": {
-                    "home": {"name": "St Patrick's Athletic", "id": 1},
-                    "away": {"name": "Shelbourne", "id": 2},
-                },
-            },
-            {
-                "fixture": {
-                    "status": {"short": "HT", "elapsed": None},
-                    "date": f"{today}T15:00:00+00:00",
-                    "venue": {"name": "Richmond Park"},
-                },
-                "league": {"id": 218},  # First Division
-                "goals": {"home": 1, "away": 0},
-                "teams": {
-                    "home": {"name": "St Patrick's Athletic", "id": 3},
-                    "away": {"name": "Shelbourne", "id": 4},
-                },
-            },
+            _make_fixture(
+                status_short="1H",
+                elapsed=23,
+                date_str=f"{today}T19:45:00+00:00",
+                venue_name="Richmond Park",
+                home_name="St Patrick's Athletic",
+                home_id=1,
+                away_name="Shelbourne",
+                away_id=2,
+                home_goals=2,
+                away_goals=0,
+                league_id=126,
+            ),
+            _make_fixture(
+                status_short="HT",
+                date_str=f"{today}T15:00:00+00:00",
+                venue_name="Richmond Park",
+                home_name="St Patrick's Athletic",
+                home_id=3,
+                away_name="Shelbourne",
+                away_id=4,
+                home_goals=1,
+                away_goals=0,
+                league_id=218,
+            ),
         ]
 
         mock_get_fixtures.return_value = fixtures
@@ -1129,45 +1153,45 @@ class TestLOIPremierRound1Simulation(unittest.TestCase):
         ]
 
     def test_convert_round_1_fixtures(self):
-        """Test converting all Round 1 raw fixtures to api-football format."""
-        from match_client import convert_raw_match
+        """Test converting all Round 1 raw fixtures to Fixtures."""
+        from match_client import to_fixture
 
-        converted = [convert_raw_match(m) for m in self.raw_round_1_fixtures]
+        converted = [to_fixture(m) for m in self.raw_round_1_fixtures]
 
         self.assertEqual(len(converted), 5)
 
         # Check Derry vs Sligo (2H, 67')
         derry_sligo = converted[0]
-        self.assertEqual(derry_sligo["teams"]["home"]["name"], "Derry City")
-        self.assertEqual(derry_sligo["teams"]["away"]["name"], "Sligo Rovers")
-        self.assertEqual(derry_sligo["goals"]["home"], 2)
-        self.assertEqual(derry_sligo["goals"]["away"], 1)
-        self.assertEqual(derry_sligo["fixture"]["status"]["short"], "2H")
+        self.assertEqual(derry_sligo.home.name, "Derry City")
+        self.assertEqual(derry_sligo.away.name, "Sligo Rovers")
+        self.assertEqual(derry_sligo.home_goals, 2)
+        self.assertEqual(derry_sligo.away_goals, 1)
+        self.assertEqual(derry_sligo.status.short, "2H")
 
         # Check Galway vs Drogheda (HT, 0-0)
         galway_drogheda = converted[1]
-        self.assertEqual(galway_drogheda["teams"]["home"]["name"], "Galway United FC")
-        self.assertEqual(galway_drogheda["goals"]["home"], 0)
-        self.assertEqual(galway_drogheda["goals"]["away"], 0)
-        self.assertEqual(galway_drogheda["fixture"]["status"]["short"], "HT")
+        self.assertEqual(galway_drogheda.home.name, "Galway United FC")
+        self.assertEqual(galway_drogheda.home_goals, 0)
+        self.assertEqual(galway_drogheda.away_goals, 0)
+        self.assertEqual(galway_drogheda.status.short, "HT")
 
         # Check Waterford vs Shelbourne (2H, 78')
         waterford_shels = converted[2]
-        self.assertEqual(waterford_shels["teams"]["away"]["name"], "Shelbourne")
-        self.assertEqual(waterford_shels["goals"]["home"], 1)
-        self.assertEqual(waterford_shels["goals"]["away"], 3)
+        self.assertEqual(waterford_shels.away.name, "Shelbourne")
+        self.assertEqual(waterford_shels.home_goals, 1)
+        self.assertEqual(waterford_shels.away_goals, 3)
 
         # Check Shamrock Rovers vs Dundalk (1H, 23')
         rovers_dundalk = converted[3]
-        self.assertEqual(rovers_dundalk["teams"]["home"]["name"], "Shamrock Rovers")
-        self.assertEqual(rovers_dundalk["fixture"]["status"]["short"], "1H")
-        self.assertEqual(rovers_dundalk["fixture"]["status"]["elapsed"], 23)
+        self.assertEqual(rovers_dundalk.home.name, "Shamrock Rovers")
+        self.assertEqual(rovers_dundalk.status.short, "1H")
+        self.assertEqual(rovers_dundalk.status.elapsed, 23)
 
         # Check Bohs vs St Pats (NS - not started yet)
         bohs_pats = converted[4]
-        self.assertEqual(bohs_pats["teams"]["home"]["name"], "Bohemian FC")
-        self.assertEqual(bohs_pats["teams"]["away"]["name"], "St. Patrick's Athletic")
-        self.assertEqual(bohs_pats["fixture"]["status"]["short"], "NS")
+        self.assertEqual(bohs_pats.home.name, "Bohemian FC")
+        self.assertEqual(bohs_pats.away.name, "St. Patrick's Athletic")
+        self.assertEqual(bohs_pats.status.short, "NS")
 
     def test_filter_live_matches_from_round_1(self):
         """Test filtering only live matches from Round 1."""
@@ -1185,10 +1209,10 @@ class TestLOIPremierRound1Simulation(unittest.TestCase):
 
     def test_format_round_1_for_display(self):
         """Test formatting Round 1 matches for Reddit display."""
-        from match_client import convert_raw_match
+        from match_client import to_fixture
         from common import format_live_fixture
 
-        converted = [convert_raw_match(m) for m in self.raw_round_1_fixtures]
+        converted = [to_fixture(m) for m in self.raw_round_1_fixtures]
         formatted = [format_live_fixture(m) for m in converted]
 
         # Check format: [home, score, away, venue, status, kickoff, scorers]
@@ -1214,13 +1238,13 @@ class TestLOIPremierRound1Simulation(unittest.TestCase):
 
     def test_organize_round_1_by_date(self):
         """Test organizing Round 1 fixtures by match date."""
-        from match_client import convert_raw_match
+        from match_client import to_fixture
 
-        converted = [convert_raw_match(m) for m in self.raw_round_1_fixtures]
+        converted = [to_fixture(m) for m in self.raw_round_1_fixtures]
 
         matches_by_date = {}
         for match in converted:
-            match_date = match["fixture"]["date"][:10]
+            match_date = match.date[:10]
             matches_by_date.setdefault(match_date, []).append(match)
 
         # Should have 2 dates: Feb 6 (4 matches) and Feb 8 (1 match)
@@ -1232,42 +1256,44 @@ class TestLOIPremierRound1Simulation(unittest.TestCase):
 
     def test_simulate_goals_with_events(self):
         """Test simulating goal events for Derry vs Sligo match."""
-        from match_client import convert_raw_match
+        from match_client import to_fixture
 
-        # Add simulated events to the Derry vs Sligo match
-        derry_sligo_with_events = self.raw_round_1_fixtures[0].copy()
+        # Convert the Derry vs Sligo match
+        converted = to_fixture(self.raw_round_1_fixtures[0])
 
-        # Simulate converted match with events
-        converted = convert_raw_match(derry_sligo_with_events)
-        converted["events"] = [
-            {
-                "type": "Goal",
-                "team": {"name": "Derry City"},
-                "player": {"name": "Patrick McEleney"},
-                "time": {"elapsed": 12},
-                "detail": "Normal Goal",
-            },
-            {
-                "type": "Goal",
-                "team": {"name": "Sligo Rovers"},
-                "player": {"name": "Aidan Keena"},
-                "time": {"elapsed": 34},
-                "detail": "Penalty",
-            },
-            {
-                "type": "Goal",
-                "team": {"name": "Derry City"},
-                "player": {"name": "Will Patching"},
-                "time": {"elapsed": 58},
-                "detail": "Normal Goal",
-            },
+        # Simulate adding GoalEvents
+        converted.events = [
+            GoalEvent(
+                player="Patrick McEleney",
+                team="Derry City",
+                minute=12,
+                is_home=True,
+                is_penalty=False,
+                is_own_goal=False,
+            ),
+            GoalEvent(
+                player="Aidan Keena",
+                team="Sligo Rovers",
+                minute=34,
+                is_home=False,
+                is_penalty=True,
+                is_own_goal=False,
+            ),
+            GoalEvent(
+                player="Will Patching",
+                team="Derry City",
+                minute=58,
+                is_home=True,
+                is_penalty=False,
+                is_own_goal=False,
+            ),
         ]
 
         # Verify events
-        self.assertEqual(len(converted["events"]), 3)
-        self.assertEqual(converted["events"][0]["player"]["name"], "Patrick McEleney")
-        self.assertEqual(converted["events"][1]["detail"], "Penalty")
-        self.assertEqual(converted["events"][2]["time"]["elapsed"], 58)
+        self.assertEqual(len(converted.events), 3)
+        self.assertEqual(converted.events[0].player, "Patrick McEleney")
+        self.assertTrue(converted.events[1].is_penalty)
+        self.assertEqual(converted.events[2].minute, 58)
 
     @patch("live_updater._cleanup_finished_match_day")
     @patch("live_updater.update_reddit_post")
@@ -1283,7 +1309,7 @@ class TestLOIPremierRound1Simulation(unittest.TestCase):
         _mock_cleanup,
     ):
         """Simulate a full Round 1 live update cycle."""
-        from match_client import convert_raw_match
+        from match_client import to_fixture
 
         # Set up cache for Round 1
         mock_load_cache.return_value = {
@@ -1299,7 +1325,7 @@ class TestLOIPremierRound1Simulation(unittest.TestCase):
             m for m in self.raw_round_1_fixtures
             if m["status"].get("started") and not m["status"].get("finished")
         ]
-        converted_fixtures = [convert_raw_match(m) for m in live_raw]
+        converted_fixtures = [to_fixture(m) for m in live_raw]
 
         mock_get_fixtures.return_value = converted_fixtures
         mock_get_table.return_value = []  # Empty table for Round 1
@@ -1308,7 +1334,7 @@ class TestLOIPremierRound1Simulation(unittest.TestCase):
         # Organize by league
         fixtures_by_league = {126: [], 218: [], 219: []}
         for fixture in converted_fixtures:
-            league_id = fixture["league"]["id"]
+            league_id = fixture.league_id
             if league_id in fixtures_by_league:
                 fixtures_by_league[league_id].append(fixture)
 
@@ -1316,7 +1342,7 @@ class TestLOIPremierRound1Simulation(unittest.TestCase):
         self.assertEqual(len(fixtures_by_league[126]), 4)
 
         # Verify match details
-        home_teams = [f["teams"]["home"]["name"] for f in fixtures_by_league[126]]
+        home_teams = [f.home.name for f in fixtures_by_league[126]]
         self.assertIn("Derry City", home_teams)
         self.assertIn("Galway United FC", home_teams)
         self.assertIn("Waterford FC", home_teams)

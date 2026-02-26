@@ -29,8 +29,8 @@ from common import (
 from match_client import (
     MatchDataClient,
     LEAGUE_ID_PREMIER,
-    convert_raw_match,
-    convert_raw_table,
+    to_fixture,
+    to_standing,
     enrich_fixtures_with_venues,
 )
 
@@ -50,8 +50,8 @@ def get_matches_for_league():
         data = client.get_league_matches(LEAGUE_ID_PREMIER, tab=tab)
         for match in client.extract_matches(data):
             match["_league_id"] = LEAGUE_ID_PREMIER
-            converted = convert_raw_match(match)
-            fixture_id = converted["fixture"]["id"]
+            converted = to_fixture(match)
+            fixture_id = converted.id
             # Results tab has more accurate data for finished matches
             if fixture_id not in fixtures_by_id or tab == "results":
                 fixtures_by_id[fixture_id] = converted
@@ -67,7 +67,7 @@ def get_league_table():
         List of team standings in api-football compatible format
     """
     raw_table = client.get_league_table(LEAGUE_ID_PREMIER)
-    return convert_raw_table(raw_table or [])
+    return [to_standing(row) for row in (raw_table or [])]
 
 
 def submit_reddit_post(title, body):
@@ -99,7 +99,7 @@ def build_post_body(matches_data, league_table):
         date = get_fixture_dublin_date(match)
         matches_by_date.setdefault(date, []).append(match)
 
-    body = "*Live scores and league table will be updated during matches*\n\n"
+    body = "*Live scores will be updated during matches*\n\n"
 
     for date, matches_list in sorted(matches_by_date.items()):
         date_extracted = datetime.strptime(date, "%Y-%m-%d")
@@ -117,17 +117,17 @@ def build_post_body(matches_data, league_table):
 
     table_data = [
         [
-            item["rank"],
-            normalise_team_name(item["team"]["name"]),
-            item["all"]["played"],
-            item["all"]["win"],
-            item["all"]["draw"],
-            item["all"]["lose"],
-            item["all"]["goals"]["for"],
-            item["all"]["goals"]["against"],
-            item["goalsDiff"],
-            item["points"],
-            get_last_matches(item["team"]["id"], league_table),
+            item.rank,
+            normalise_team_name(item.team.name),
+            item.played,
+            item.won,
+            item.drawn,
+            item.lost,
+            item.goals_for,
+            item.goals_against,
+            item.goal_diff,
+            item.points,
+            get_last_matches(item.team.id, league_table),
         ]
         for item in league_table
     ]
@@ -184,7 +184,7 @@ def main():
         # Save post metadata to cache for live updater
         cache = load_cache()
         match_dates = sorted({
-            parse_match_datetime(m["fixture"]["date"]).date().isoformat()
+            parse_match_datetime(m.date).date().isoformat()
             for m in weekly_matches
         })
 

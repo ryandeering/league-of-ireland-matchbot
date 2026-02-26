@@ -23,6 +23,9 @@ from datetime import datetime
 import praw
 from praw.exceptions import PRAWException
 
+from match_client import to_fixture
+from live_updater import build_premier_body, build_cup_body
+
 
 def get_reddit_client():
     """Create Reddit client from environment variables."""
@@ -308,9 +311,6 @@ class TestDryRun(unittest.TestCase):
 
     def test_build_post_body_premier(self):
         """Test building Premier Division post body."""
-        from match_client import convert_raw_match
-        from live_updater import build_premier_body
-
         # Sample fixtures
         raw_fixtures = [
             {
@@ -329,7 +329,7 @@ class TestDryRun(unittest.TestCase):
             }
         ]
 
-        converted = [convert_raw_match(f) for f in raw_fixtures]
+        converted = [to_fixture(f) for f in raw_fixtures]
 
         league_table = []
 
@@ -340,16 +340,13 @@ class TestDryRun(unittest.TestCase):
         print("---")
 
         # Verify structure
-        self.assertIn("Live scores and league table will be updated", body)
+        self.assertIn("Live scores will be updated", body)
         self.assertIn("Shamrock Rovers", body)
         self.assertIn("2-1", body)
         self.assertIn("Welcome to the discussion thread", body)
 
     def test_build_post_body_cup(self):
         """Test building FAI Cup post body."""
-        from match_client import convert_raw_match
-        from live_updater import build_cup_body
-
         raw_fixtures = [
             {
                 "id": "456",
@@ -367,7 +364,7 @@ class TestDryRun(unittest.TestCase):
             }
         ]
 
-        converted = [convert_raw_match(f) for f in raw_fixtures]
+        converted = [to_fixture(f) for f in raw_fixtures]
 
         body = build_cup_body(converted, "Quarter-finals")
 
