@@ -713,6 +713,18 @@ def _cleanup_finished_match_day(cache, today, competitions_today):
             logger.info("%s still has matches in progress or not yet finished.", comp_name)
             continue
 
+        scored_without_events = [
+            f for f in todays_fixtures
+            if (f.home_goals or 0) + (f.away_goals or 0) > 0
+            and not _load_persisted_events(f.id)
+        ]
+        if scored_without_events:
+            logger.info(
+                "%s has %d scored match(es) missing events, not marking complete.",
+                comp_name, len(scored_without_events),
+            )
+            continue
+
         comp_cache = cache.get(comp_name, {})
         completed = comp_cache.get("completed_dates", [])
         if today_str not in completed:
